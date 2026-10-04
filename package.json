@@ -1,0 +1,25 @@
+{
+  "name": "minions",
+  "private": true,
+  "version": "0.1.0",
+  "packageManager": "pnpm@11.5.3",
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "scripts": {
+    "db:up": "docker compose up -d postgres",
+    "db:down": "docker compose stop postgres",
+    "dev": "pnpm -r --parallel --filter @minions/api --filter @minions/web dev",
+    "build": "pnpm -r build",
+    "typecheck": "pnpm -r typecheck",
+    "test": "pnpm -r test",
+    "seed:demo": "node scripts/seed-demo.mjs",
+    "lint": "biome check .",
+    "lint:fix": "biome check --write ."
+  },
+  "devDependencies": {
+    "@biomejs/biome": "2.5.15",
+    "playwright": "^1.63.0",
+    "typescript": "5.9.3"
+  }
+}

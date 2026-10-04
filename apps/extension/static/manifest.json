@@ -1,0 +1,26 @@
+{
+  "manifest_version": 3,
+  "name": "Minions",
+  "description": "Fill and save logins from your Minions vault. End-to-end encrypted.",
+  "version": "0.1.0",
+  "icons": { "128": "icon.png" },
+  "action": { "default_popup": "popup.html", "default_title": "Minions" },
+  "background": { "service_worker": "background.js", "type": "module" },
+  "minimum_chrome_version": "120",
+  "permissions": ["storage", "activeTab", "alarms", "offscreen", "clipboardWrite"],
+  "host_permissions": [],
+  "content_scripts": [
+    {
+      "matches": ["https://*/*", "http://localhost/*", "http://127.0.0.1/*"],
+      "js": ["content.js"],
+      "run_at": "document_idle",
+      "all_frames": false
+    }
+  ],
+  "content_security_policy": {
+    "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'none'; base-uri 'none'"
+  },
+  "commands": {
+    "_execute_action": { "suggested_key": { "default": "Ctrl+Shift+L", "mac": "Command+Shift+L" } }
+  }
+}

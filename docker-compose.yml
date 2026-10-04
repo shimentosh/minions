@@ -1,0 +1,30 @@
+# Minions' own database. Separate container, volume and port from anything
+# else on the machine.
+services:
+  postgres:
+    image: postgres:17-alpine
+    container_name: minions-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: minions
+      POSTGRES_USER: minions
+      POSTGRES_PASSWORD: ${MINIONS_DB_PASSWORD:-minions_dev_only}
+    ports:
+      - "55440:5432"
+    volumes:
+      - minions-pg:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U minions -d minions"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+  # Shared rate-limit counters, so limits hold across several API instances.
+  redis:
+    image: redis:7-alpine
+    container_name: minions-redis
+    restart: unless-stopped
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    ports:
+      - "56379:6379"
+volumes:
+  minions-pg:

@@ -1,0 +1,749 @@
+// Minions database schema. See ARCHITECTURE.md.
+//
+// Rules this schema is built around:
+//  * No column holds a plaintext secret. Secret values are client-encrypted
+//    envelopes ("v1.<iv>.<ct>") in vault_item_fields.value (sensitive = true),
+//    vault_item_versions.fields and notes.content_enc.
+//  * Every vault-owned row reaches its user through vault_id, and every query
+//    is scoped by it.
+//  * Item types are strings validated against @minions/core, not an enum.
+
+generator client {
+  provider     = "prisma-client"
+  output       = "../src/generated/prisma"
+  moduleFormat = "cjs"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// ─── Accounts ────────────────────────────────────────────────────────────────
+
+model User {
+  id                  String    @id @db.Uuid
+  email               String    @unique
+  /// Set once the person proved they receive mail at `email`. Nothing may treat an unverified address as identity.
+  emailVerifiedAt    DateTime?
+  name                String
+  /// Argon2id(authKey). authKey is HKDF(masterKey); the master password never arrives.
+  authHash            String
+  kdfType             String    @default("argon2id")
+  kdfMemory           Int
+  kdfIterations       Int
+  kdfParallelism      Int
+  kdfSalt             String
+  /// User key wrapped by the client's stretched master key.
+  protectedUserKey    String
+  /// Sharing key pair: RSA-OAEP SPKI (public), and the PKCS#8 private key wrapped by the user key.
+  publicKey           String?
+  protectedPrivateKey String?
+  twoFactorEnabled    Boolean   @default(false)
+  /// Account TOTP secret, encrypted with SERVER_ENCRYPTION_KEY (the server must verify codes).
+  twoFactorSecretEnc  String?
+  /// Last accepted TOTP time step, so a code cannot be replayed within its window.
+  lastTotpStep        Int?
+  failedLoginCount    Int       @default(0)
+  lockedUntil         DateTime?
+  autoLockMinutes     Int       @default(15)
+  clipboardClearSecs  Int       @default(30)
+  aiEnabled           Boolean   @default(true)
+  lastVisitAt         DateTime?
+  previousVisitAt     DateTime?
+  createdAt           DateTime  @default(now())
+  updatedAt           DateTime  @updatedAt
+
+  vaults              Vault[]
+  recoveryCodes       RecoveryCode[]
+  emailVerifications  EmailVerification[]
+  webauthnCredentials WebauthnCredential[]
+  devices             Device[]
+  sessions            Session[]
+  activity            ActivityLog[]
+  securityEvents      SecurityEvent[]
+  aiClassifications   AiClassification[]
+  preferences         UserClassificationPreference[]
+  importJobs          ImportJob[]
+  memberships         WorkspaceMember[]              @relation("MemberUser")
+  itemGrants          WorkspaceItemGrant[]           @relation("GrantUser")
+  itemFavorites       WorkspaceItemFavorite[]
+  createdItems        VaultItem[]                    @relation("ItemCreator")
+
+  @@map("users")
+}
+
+/// Single-use email verification links. Only the SHA-256 of the token is stored.
+model EmailVerification {
+  id        String    @id @default(uuid()) @db.Uuid
+  userId    String    @db.Uuid
+  tokenHash String    @unique
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime  @default(now())
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("email_verifications")
+}
+
+model RecoveryCode {
+  id        String    @id @default(uuid()) @db.Uuid
+  userId    String    @db.Uuid
+  /// SHA-256 of a 50-bit random code; high entropy, so a fast hash is enough.
+  codeHash  String
+  usedAt    DateTime?
+  createdAt DateTime  @default(now())
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("recovery_codes")
+}
+
+/// Passkeys. Schema is in place; registration/assertion endpoints are a
+/// pending integration (see SECURITY.md, "Passkeys").
+model WebauthnCredential {
+  id           String    @id @default(uuid()) @db.Uuid
+  userId       String    @db.Uuid
+  credentialId String    @unique
+  publicKey    String
+  counter      BigInt    @default(0)
+  transports   String[]
+  name         String
+  createdAt    DateTime  @default(now())
+  lastUsedAt   DateTime?
+  user         User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("webauthn_credentials")
+}
+
+enum DeviceKind {
+  WEB
+  EXTENSION
+  DESKTOP
+}
+
+model Device {
+  id             String     @id @default(uuid()) @db.Uuid
+  userId         String     @db.Uuid
+  clientDeviceId String
+  name           String
+  kind           DeviceKind
+  userAgent      String?
+  lastIp         String?
+  lastActiveAt   DateTime   @default(now())
+  revokedAt      DateTime?
+  createdAt      DateTime   @default(now())
+  user           User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  sessions       Session[]
+
+  @@unique([userId, clientDeviceId])
+  @@index([userId, lastActiveAt])
+  @@map("devices")
+}
+
+enum SessionState {
+  PENDING_2FA
+  ACTIVE
+}
+
+model Session {
+  id                         String       @id @default(uuid()) @db.Uuid
+  userId                     String       @db.Uuid
+  deviceId                   String?      @db.Uuid
+  /// SHA-256 of the bearer/cookie token. The token itself is never stored.
+  tokenHash                  String       @unique
+  state                      SessionState
+  vaultUnlockedUntil         DateTime?
+  twoFactorAttempts          Int          @default(0)
+  /// The current WebAuthn challenge for this session (passkey sign-in or registration).
+  webauthnChallenge          String?
+  webauthnChallengeExpiresAt DateTime?
+  ip                         String?
+  userAgent                  String?
+  createdAt                  DateTime     @default(now())
+  lastActiveAt               DateTime     @default(now())
+  expiresAt                  DateTime
+  revokedAt                  DateTime?
+  user                       User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  device                     Device?      @relation(fields: [deviceId], references: [id], onDelete: SetNull)
+
+  @@index([userId, revokedAt])
+  @@map("sessions")
+}
+
+// ─── Vault ───────────────────────────────────────────────────────────────────
+
+/// A personal vault (userId set) or a workspace's vault (workspace set, userId null).
+model Vault {
+  id                  String   @id @db.Uuid
+  userId              String?  @db.Uuid
+  name                String   @default("Personal")
+  /// Personal: vault key wrapped by the user key. Workspace vaults: unused ("-"),
+  /// each item has its own key (see WorkspaceItemGrant).
+  protectedKey        String
+  /// Generation of the vault key. Rows carry the generation they are encrypted under.
+  keyGen              Int      @default(1)
+  /// During a key rotation: the new vault key, wrapped by the user key. Null otherwise.
+  pendingProtectedKey String?
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+
+  user        User?        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  workspace   Workspace?
+  items       VaultItem[]
+  projects    Project[]
+  collections Collection[]
+  tags        Tag[]
+  notes       Note[]
+
+  @@index([userId])
+  @@map("vaults")
+}
+
+model Project {
+  id          String    @id @default(uuid()) @db.Uuid
+  vaultId     String    @db.Uuid
+  name        String
+  description String?
+  color       String?
+  archivedAt  DateTime?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  vault  Vault             @relation(fields: [vaultId], references: [id], onDelete: Cascade)
+  items  VaultItem[]
+  notes  Note[]
+  usedBy ItemProjectLink[]
+
+  @@unique([vaultId, name])
+  @@map("projects")
+}
+
+model Collection {
+  id          String   @id @default(uuid()) @db.Uuid
+  vaultId     String   @db.Uuid
+  name        String
+  description String?
+  color       String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  vault Vault       @relation(fields: [vaultId], references: [id], onDelete: Cascade)
+  items VaultItem[]
+  notes Note[]
+
+  @@unique([vaultId, name])
+  @@map("collections")
+}
+
+model Tag {
+  id        String   @id @default(uuid()) @db.Uuid
+  vaultId   String   @db.Uuid
+  name      String
+  createdAt DateTime @default(now())
+
+  vault Vault          @relation(fields: [vaultId], references: [id], onDelete: Cascade)
+  items VaultItemTag[]
+  notes NoteTag[]
+
+  @@unique([vaultId, name])
+  @@map("tags")
+}
+
+model VaultItem {
+  /// Client-generated so ciphertext AAD can bind to it before the first save.
+  id           String  @id @db.Uuid
+  vaultId      String  @db.Uuid
+  type         String
+  name         String
+  description  String?
+  projectId    String? @db.Uuid
+  collectionId String? @db.Uuid
+  favorite     Boolean @default(false)
+  /// Genuinely flexible, non-secret metadata only.
+  metadata     Json?
+  /// Vault key generation the fields (and their versions) are encrypted under.
+  keyGen       Int     @default(1)
+
+  // Derived from non-sensitive fields by the server, for search and matching.
+  host        String?
+  username    String?
+  provider    String?
+  environment String?
+  status      String?
+  /// Lowercased name/host/username/provider/environment/description, trigram-indexed.
+  searchText  String  @default("")
+
+  // Coarse signals derived by the client from secrets (see ARCHITECTURE.md §1).
+  passwordStrength    Int?
+  passwordFingerprint String?
+  passwordUpdatedAt   DateTime?
+  hasTotp             Boolean   @default(false)
+  cardLast4           String?
+  cardBrand           String?
+
+  expiresAt      DateTime?
+  lastRotatedAt  DateTime?
+  lastAccessedAt DateTime?
+  accessCount    Int       @default(0)
+  revision       Int       @default(1)
+  deletedAt      DateTime?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  // Workspace items only (see ARCHITECTURE.md §7).
+  /// Everyone confirmed in the workspace may open it.
+  workspaceShared  Boolean @default(false)
+  /// When workspaceShared: the item key wrapped by the workspace key (AES-GCM envelope).
+  protectedItemKey String?
+  createdById      String? @db.Uuid
+  /// Someone who held this item's key lost access; a manager should rotate it.
+  rekeyNeeded      Boolean @default(false)
+
+  vault         Vault                   @relation(fields: [vaultId], references: [id], onDelete: Cascade)
+  createdBy     User?                   @relation("ItemCreator", fields: [createdById], references: [id], onDelete: SetNull)
+  grants        WorkspaceItemGrant[]
+  favoritedBy   WorkspaceItemFavorite[]
+  project       Project?                @relation(fields: [projectId], references: [id], onDelete: SetNull)
+  collection    Collection?             @relation(fields: [collectionId], references: [id], onDelete: SetNull)
+  fields        VaultItemField[]
+  versions      VaultItemVersion[]
+  tags          VaultItemTag[]
+  relationsFrom VaultItemRelation[]     @relation("RelationFrom")
+  relationsTo   VaultItemRelation[]     @relation("RelationTo")
+  usedBy        ItemProjectLink[]
+
+  @@index([vaultId, deletedAt, updatedAt])
+  @@index([vaultId, type])
+  @@index([vaultId, host])
+  @@index([vaultId, favorite])
+  @@index([vaultId, lastAccessedAt])
+  @@index([vaultId, passwordFingerprint])
+  @@index([searchText(ops: raw("gin_trgm_ops"))], type: Gin, map: "vault_items_search_trgm")
+  @@index([projectId])
+  @@index([collectionId])
+  @@map("vault_items")
+}
+
+model VaultItemField {
+  id        String  @id @default(uuid()) @db.Uuid
+  itemId    String  @db.Uuid
+  key       String
+  /// Only set for custom fields; registry fields take their label from @minions/core.
+  label     String?
+  kind      String?
+  sensitive Boolean
+  /// Plaintext when sensitive = false, an encryption envelope when true.
+  value     String
+  position  Int
+
+  item VaultItem @relation(fields: [itemId], references: [id], onDelete: Cascade)
+
+  @@unique([itemId, key])
+  @@map("vault_item_fields")
+}
+
+model VaultItemVersion {
+  id          String   @id @default(uuid()) @db.Uuid
+  itemId      String   @db.Uuid
+  revision    Int
+  /// Previous values of changed fields: [{key, value, sensitive}], envelopes for secrets.
+  fields      Json
+  changedKeys String[]
+  createdAt   DateTime @default(now())
+
+  item VaultItem @relation(fields: [itemId], references: [id], onDelete: Cascade)
+
+  @@unique([itemId, revision])
+  @@map("vault_item_versions")
+}
+
+model VaultItemTag {
+  itemId String @db.Uuid
+  tagId  String @db.Uuid
+
+  item VaultItem @relation(fields: [itemId], references: [id], onDelete: Cascade)
+  tag  Tag       @relation(fields: [tagId], references: [id], onDelete: Cascade)
+
+  @@id([itemId, tagId])
+  @@index([tagId])
+  @@map("vault_item_tags")
+}
+
+model VaultItemRelation {
+  id         String   @id @default(uuid()) @db.Uuid
+  fromItemId String   @db.Uuid
+  toItemId   String   @db.Uuid
+  kind       String
+  createdAt  DateTime @default(now())
+
+  from VaultItem @relation("RelationFrom", fields: [fromItemId], references: [id], onDelete: Cascade)
+  to   VaultItem @relation("RelationTo", fields: [toItemId], references: [id], onDelete: Cascade)
+
+  @@unique([fromItemId, toItemId, kind])
+  @@index([toItemId])
+  @@map("vault_item_relations")
+}
+
+/// "Used by" — one canonical credential referenced by many projects.
+model ItemProjectLink {
+  itemId    String   @db.Uuid
+  projectId String   @db.Uuid
+  createdAt DateTime @default(now())
+
+  item    VaultItem @relation(fields: [itemId], references: [id], onDelete: Cascade)
+  project Project   @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@id([itemId, projectId])
+  @@index([projectId])
+  @@map("item_project_links")
+}
+
+// ─── Notes ───────────────────────────────────────────────────────────────────
+
+model Note {
+  id           String    @id @db.Uuid
+  vaultId      String    @db.Uuid
+  title        String
+  /// Rich-text HTML encrypted with the vault key.
+  contentEnc   String?
+  /// Vault key generation the body (and its versions) is encrypted under.
+  keyGen       Int       @default(1)
+  projectId    String?   @db.Uuid
+  collectionId String?   @db.Uuid
+  pinned       Boolean   @default(false)
+  favorite     Boolean   @default(false)
+  archivedAt   DateTime?
+  deletedAt    DateTime?
+  revision     Int       @default(1)
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  vault      Vault         @relation(fields: [vaultId], references: [id], onDelete: Cascade)
+  project    Project?      @relation(fields: [projectId], references: [id], onDelete: SetNull)
+  collection Collection?   @relation(fields: [collectionId], references: [id], onDelete: SetNull)
+  tags       NoteTag[]
+  versions   NoteVersion[]
+
+  @@index([vaultId, deletedAt, updatedAt])
+  @@index([title(ops: raw("gin_trgm_ops"))], type: Gin, map: "notes_title_trgm")
+  @@map("notes")
+}
+
+model NoteVersion {
+  id         String   @id @default(uuid()) @db.Uuid
+  noteId     String   @db.Uuid
+  revision   Int
+  title      String
+  contentEnc String?
+  createdAt  DateTime @default(now())
+
+  note Note @relation(fields: [noteId], references: [id], onDelete: Cascade)
+
+  @@unique([noteId, revision])
+  @@map("note_versions")
+}
+
+model NoteTag {
+  noteId String @db.Uuid
+  tagId  String @db.Uuid
+
+  note Note @relation(fields: [noteId], references: [id], onDelete: Cascade)
+  tag  Tag  @relation(fields: [tagId], references: [id], onDelete: Cascade)
+
+  @@id([noteId, tagId])
+  @@index([tagId])
+  @@map("note_tags")
+}
+
+// ─── Activity & security ─────────────────────────────────────────────────────
+
+/// Never holds a secret value: action names, ids, item names and client info only.
+model ActivityLog {
+  id          String   @id @default(uuid()) @db.Uuid
+  userId      String   @db.Uuid
+  action      String
+  itemId      String?  @db.Uuid
+  itemName    String?
+  itemType    String?
+  deviceId    String?  @db.Uuid
+  sessionId   String?  @db.Uuid
+  ip          String?
+  userAgent   String?
+  metadata    Json?
+  /// Set for actions in a workspace: the workspace audit log reads these.
+  workspaceId String?  @db.Uuid
+  createdAt   DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, createdAt])
+  @@index([itemId])
+  @@index([workspaceId, createdAt])
+  @@map("activity_logs")
+}
+
+model SecurityEvent {
+  id        String   @id @default(uuid()) @db.Uuid
+  userId    String   @db.Uuid
+  type      String
+  severity  String
+  deviceId  String?  @db.Uuid
+  ip        String?
+  userAgent String?
+  metadata  Json?
+  createdAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, createdAt])
+  @@map("security_events")
+}
+
+/// The user's decisions about findings (dismissed, "keep separate" for duplicates).
+model SecurityFindingState {
+  id        String   @id @default(uuid()) @db.Uuid
+  vaultId   String   @db.Uuid
+  key       String
+  status    String
+  createdAt DateTime @default(now())
+
+  @@unique([vaultId, key])
+  @@map("security_findings")
+}
+
+/// Precomputed findings, rebuilt in the background after the vault changes
+/// (and at least hourly, since expiry and "unused" depend on the date).
+/// Only ids, labels and counts: the same safe metadata the findings come from.
+model SecurityFindingRecord {
+  id       String   @id @default(uuid()) @db.Uuid
+  vaultId  String   @db.Uuid
+  key      String
+  type     String
+  severity String
+  title    String
+  detail   String
+  itemIds  String[]
+  position Int
+
+  @@unique([vaultId, key])
+  @@index([vaultId, type, position])
+  @@map("security_finding_records")
+}
+
+model SecuritySnapshot {
+  vaultId           String    @id @db.Uuid
+  computedAt        DateTime
+  /// Set by any change to the vault; newer than computedAt means stale.
+  dirtyAt           DateTime?
+  totalItems        Int
+  passwordItems     Int
+  twoFactorEligible Int
+
+  @@map("security_snapshots")
+}
+
+model AiClassification {
+  id         String   @id @default(uuid()) @db.Uuid
+  userId     String   @db.Uuid
+  itemId     String?  @db.Uuid
+  /// The sanitised payload actually sent, for audit.
+  input      Json
+  output     Json?
+  model      String?
+  confidence Float?
+  status     String
+  createdAt  DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, createdAt])
+  @@map("ai_classifications")
+}
+
+model UserClassificationPreference {
+  id        String   @id @default(uuid()) @db.Uuid
+  userId    String   @db.Uuid
+  matchKey  String
+  target    String
+  value     String
+  weight    Int      @default(1)
+  updatedAt DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, matchKey, target, value])
+  @@index([userId, matchKey])
+  @@map("user_classification_preferences")
+}
+
+// ─── Sharing ─────────────────────────────────────────────────────────────────
+
+/// A link to one item (or a piece of text). The key is in the link's
+/// #fragment, which browsers never send, so the server holds ciphertext it
+/// cannot read. The ciphertext is deleted once the views run out, the link
+/// expires or the owner revokes it.
+model Share {
+  id             String    @id @db.Uuid
+  userId         String    @db.Uuid
+  vaultId        String    @db.Uuid
+  itemId         String?   @db.Uuid
+  /// What the owner sees in their list ("GitHub"). Not shown to recipients.
+  label          String
+  ciphertext     String?
+  expiresAt      DateTime
+  /// null = until it expires.
+  maxViews       Int?
+  viewCount      Int       @default(0)
+  /// Optional passphrase: Argon2id salt and SHA-256 of the derived access token.
+  passphraseSalt String?
+  accessHash     String?
+  failedAttempts Int       @default(0)
+  includesTotp   Boolean   @default(false)
+  lastViewedAt   DateTime?
+  burnedAt       DateTime?
+  revokedAt      DateTime?
+  createdAt      DateTime  @default(now())
+
+  @@index([userId, createdAt])
+  @@index([expiresAt])
+  @@map("shares")
+}
+
+// ─── Imports ─────────────────────────────────────────────────────────────────
+
+/// Parsing happens on the client; the server records outcomes, never content.
+model ImportJob {
+  id             String    @id @default(uuid()) @db.Uuid
+  userId         String    @db.Uuid
+  source         String
+  status         String
+  totalRecords   Int
+  importedCount  Int       @default(0)
+  skippedCount   Int       @default(0)
+  duplicateCount Int       @default(0)
+  invalidCount   Int       @default(0)
+  createdAt      DateTime  @default(now())
+  completedAt    DateTime?
+
+  user  User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  items ImportItem[]
+
+  @@index([userId, createdAt])
+  @@map("import_jobs")
+}
+
+model ImportItem {
+  id        String   @id @default(uuid()) @db.Uuid
+  jobId     String   @db.Uuid
+  sourceRow Int
+  itemId    String?  @db.Uuid
+  status    String
+  reason    String?
+  createdAt DateTime @default(now())
+
+  job ImportJob @relation(fields: [jobId], references: [id], onDelete: Cascade)
+
+  @@index([jobId])
+  @@map("import_items")
+}
+
+// ─── Workspaces ──────────────────────────────────────────────────────────────
+//
+// A workspace owns one vault. Its items are encrypted with per-item keys; the
+// server stores those keys only sealed to members' public keys (grants), or
+// wrapped by the workspace key, which is itself sealed to each confirmed
+// member. The server holds no key that opens a workspace item.
+
+enum WorkspaceRole {
+  OWNER
+  ADMIN
+  MEMBER
+}
+
+enum MemberStatus {
+  INVITED
+  ACCEPTED
+  CONFIRMED
+}
+
+enum ItemPermission {
+  VIEW
+  MANAGE
+}
+
+model Workspace {
+  id          String   @id @db.Uuid
+  name        String
+  vaultId     String   @unique @db.Uuid
+  createdById String?  @db.Uuid
+  /// A member who held the workspace key left; an admin should rotate it.
+  rekeyNeeded Boolean  @default(false)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  vault   Vault             @relation(fields: [vaultId], references: [id], onDelete: Cascade)
+  members WorkspaceMember[]
+
+  @@map("workspaces")
+}
+
+model WorkspaceMember {
+  id                    String        @id @default(uuid()) @db.Uuid
+  workspaceId           String        @db.Uuid
+  /// Null while the invitation waits for someone with this email to accept it.
+  userId                String?       @db.Uuid
+  /// Lowercased.
+  email                 String
+  role                  WorkspaceRole
+  status                MemberStatus
+  /// The workspace key sealed to this member's public key. Set by an admin's client on confirm.
+  protectedWorkspaceKey String?
+  invitedById           String?       @db.Uuid
+  createdAt             DateTime      @default(now())
+  acceptedAt            DateTime?
+  confirmedAt           DateTime?
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  user      User?     @relation("MemberUser", fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([workspaceId, email])
+  @@unique([workspaceId, userId])
+  @@index([email, status])
+  @@index([userId])
+  @@map("workspace_members")
+}
+
+/// One member's access to one workspace item, with the item key sealed to them.
+model WorkspaceItemGrant {
+  itemId           String         @db.Uuid
+  userId           String         @db.Uuid
+  workspaceId      String         @db.Uuid
+  permission       ItemPermission
+  protectedItemKey String
+  grantedById      String?        @db.Uuid
+  createdAt        DateTime       @default(now())
+
+  item VaultItem @relation(fields: [itemId], references: [id], onDelete: Cascade)
+  user User      @relation("GrantUser", fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([itemId, userId])
+  @@index([workspaceId, userId])
+  @@index([userId])
+  @@map("workspace_item_grants")
+}
+
+/// Favorites are per person: one member starring a team login does not star it for everyone.
+model WorkspaceItemFavorite {
+  itemId    String   @db.Uuid
+  userId    String   @db.Uuid
+  createdAt DateTime @default(now())
+
+  item VaultItem @relation(fields: [itemId], references: [id], onDelete: Cascade)
+  user User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([itemId, userId])
+  @@index([userId])
+  @@map("workspace_item_favorites")
+}

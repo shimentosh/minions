@@ -1,0 +1,16 @@
+node_modules/
+dist/
+dist-e2e/
+build/
+coverage/
+.env
+.env.*
+!.env.example
+*.log
+.turbo/
+apps/api/src/generated/
+apps/desktop/src-tauri/target/
+apps/desktop/src-tauri/gen/
+apps/extension/dist/
+.DS_Store
+tests/e2e/screenshots/

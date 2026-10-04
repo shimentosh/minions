@@ -1,0 +1,27 @@
+[package]
+name = "minions-desktop"
+version = "0.1.0"
+description = "Minions desktop vault"
+edition = "2021"
+
+[lib]
+name = "minions_desktop_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# The session token lives in the OS credential store (Windows Credential
+# Manager, macOS Keychain, Secret Service), never in a file.
+keyring = { version = "3.6", features = ["windows-native", "apple-native", "sync-secret-service"] }
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = "s"
+panic = "abort"
+strip = true

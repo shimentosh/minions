@@ -1,0 +1,27 @@
+packages:
+  - "apps/*"
+  - "packages/*"
+allowBuilds:
+  esbuild: true
+  "@swc/core": true
+  prisma: true
+  "@prisma/engines": true
+  "@node-rs/argon2": true
+  "@tailwindcss/oxide": true
+minimumReleaseAgeExclude:
+  - '@biomejs/*'
+  - '@tauri-apps/cli-darwin-arm64@2.12.1'
+  - '@tauri-apps/cli-darwin-x64@2.12.1'
+  - '@tauri-apps/cli-linux-arm-gnueabihf@2.12.1'
+  - '@tauri-apps/cli-linux-arm64-gnu@2.12.1'
+  - '@tauri-apps/cli-linux-arm64-musl@2.12.1'
+  - '@tauri-apps/cli-linux-riscv64-gnu@2.12.1'
+  - '@tauri-apps/cli-linux-x64-gnu@2.12.1'
+  - '@tauri-apps/cli-linux-x64-musl@2.12.1'
+  - '@tauri-apps/cli-win32-arm64-msvc@2.12.1'
+  - '@tauri-apps/cli-win32-ia32-msvc@2.12.1'
+  - '@tauri-apps/cli-win32-x64-msvc@2.12.1'
+  - '@tauri-apps/cli@2.12.1'
+overrides:
+  # Transitive, used only by the prisma CLI. Same-major security fix (GHSA-3f6p-5ww8-9rcr, GHSA-rgwj-5xj2-c3m3).
+  mysql2: ">=3.23.1 <4"
