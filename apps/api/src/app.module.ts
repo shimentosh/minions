@@ -12,6 +12,7 @@ import { PasskeyController, PasskeyService } from "./auth/passkeys";
 import { SafeExceptionFilter } from "./common/exception.filter";
 import { SessionGuard } from "./common/guards";
 import { PrismaModule } from "./common/prisma.service";
+import { HealthController } from "./health.controller";
 import { ImportsModule } from "./imports/imports.module";
 import { NotesModule } from "./notes/notes.module";
 import { OperatorModule } from "./operator/operator.module";
@@ -63,6 +64,7 @@ function throttlerStorage() {
     OperatorModule,
   ],
   controllers: [
+    HealthController,
     AuthController,
     PasskeyController,
     VaultController,

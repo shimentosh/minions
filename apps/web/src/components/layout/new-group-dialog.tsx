@@ -72,6 +72,7 @@ export function NewGroupDialog({
       <DialogTrigger render={trigger} />
       <DialogPopup className="max-w-md">
         <form
+          className="flex min-h-0 flex-col"
           onSubmit={(e) => {
             e.preventDefault();
             if (name.trim()) create.mutate();

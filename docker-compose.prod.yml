@@ -1,0 +1,60 @@
+# Production stack for Dokploy (or any Docker host behind a TLS proxy).
+#
+#   web  nginx: the web app, plus /api/* proxied to the API. The only public
+#        service: give it the domain, container port 80.
+#   api  NestJS API on :4600, internal only. Applies database migrations on start.
+#
+# PostgreSQL and Redis are not in this file: run them as separate services
+# (Dokploy databases) on the shared dokploy-network, and point DATABASE_URL and
+# REDIS_URL at their internal hostnames. Variables marked :? are required;
+# the deploy fails with a clear message if one is missing.
+
+services:
+  api:
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      PORT: "4600"
+      # Traefik and nginx sit in front, both on private Docker networks.
+      TRUST_PROXY: loopback, linklocal, uniquelocal
+      DATABASE_URL: ${DATABASE_URL:?set DATABASE_URL}
+      REDIS_URL: ${REDIS_URL:-}
+      SERVER_ENCRYPTION_KEY: ${SERVER_ENCRYPTION_KEY:?set SERVER_ENCRYPTION_KEY}
+      PRELOGIN_SECRET: ${PRELOGIN_SECRET:?set PRELOGIN_SECRET}
+      WEB_ORIGINS: ${WEB_ORIGINS:?set WEB_ORIGINS}
+      PUBLIC_WEB_URL: ${PUBLIC_WEB_URL:?set PUBLIC_WEB_URL}
+      WEBAUTHN_RP_ID: ${WEBAUTHN_RP_ID:?set WEBAUTHN_RP_ID}
+      WEBAUTHN_ORIGINS: ${WEBAUTHN_ORIGINS:?set WEBAUTHN_ORIGINS}
+      RESEND_API_KEY: ${RESEND_API_KEY:?set RESEND_API_KEY}
+      MAIL_FROM: ${MAIL_FROM:?set MAIL_FROM}
+      EXTENSION_ORIGINS: ${EXTENSION_ORIGINS:-}
+      OPERATOR_USER_IDS: ${OPERATOR_USER_IDS:-}
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
+      DEEPSEEK_BASE_URL: ${DEEPSEEK_BASE_URL:-https://api.deepseek.com}
+      DEEPSEEK_MODEL: ${DEEPSEEK_MODEL:-deepseek-chat}
+    networks:
+      internal:
+        # nginx reaches the API by this name; unique, so it can't collide with
+        # another project's "api" on the shared network.
+        aliases: [minions-api]
+      dokploy-network: {}
+
+  web:
+    build:
+      context: .
+      dockerfile: apps/web/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      api:
+        condition: service_healthy
+    networks:
+      - internal
+      - dokploy-network
+
+networks:
+  internal: {}
+  dokploy-network:
+    external: true

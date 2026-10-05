@@ -11,7 +11,8 @@ import { defineConfig, loadEnv, type Plugin } from "vite";
  * cannot be set from a meta tag: the web server must send them (SECURITY.md).
  */
 function contentSecurityPolicy(apiUrl: string | undefined): Plugin {
-  const api = apiUrl ? new URL(apiUrl).origin : "";
+  // A relative URL ("/api", same origin behind a proxy) is covered by 'self'.
+  const api = apiUrl && /^https?:\/\//.test(apiUrl) ? new URL(apiUrl).origin : "";
   const policy = [
     "default-src 'self'",
     "script-src 'self' 'wasm-unsafe-eval'",

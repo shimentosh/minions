@@ -9,6 +9,8 @@
   "scripts": {
     "db:up": "docker compose up -d postgres",
     "db:down": "docker compose stop postgres",
+    "mail:up": "docker compose up -d mailpit",
+    "mail:down": "docker compose stop mailpit",
     "dev": "pnpm -r --parallel --filter @minions/api --filter @minions/web dev",
     "build": "pnpm -r build",
     "typecheck": "pnpm -r typecheck",

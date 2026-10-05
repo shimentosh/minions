@@ -26,5 +26,12 @@ services:
     command: ["redis-server", "--save", "", "--appendonly", "no"]
     ports:
       - "56379:6379"
+  # Catches development email (MAILPIT_URL). Inbox and send API on :58025.
+  mailpit:
+    image: axllent/mailpit:latest
+    container_name: minions-mailpit
+    restart: unless-stopped
+    ports:
+      - "58025:8025"
 volumes:
   minions-pg:

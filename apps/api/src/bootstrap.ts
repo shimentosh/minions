@@ -8,7 +8,7 @@ import { loadConfig } from "./config";
 export function configureApp(app: INestApplication) {
   const cfg = loadConfig();
   const express = app as NestExpressApplication;
-  express.set("trust proxy", "loopback");
+  express.set("trust proxy", cfg.trustProxy);
   express.disable("x-powered-by");
   express.useBodyParser("json", { limit: "3mb" });
   app.use(

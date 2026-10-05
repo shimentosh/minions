@@ -379,7 +379,48 @@ describe("production configuration", () => {
     process.env.RESEND_API_KEY = "re_test_key";
     process.env.MAIL_FROM = "Minions <no-reply@vault.example.com>";
     process.env.PUBLIC_WEB_URL = "https://vault.example.com";
+    delete process.env.MAILPIT_URL;
     resetConfig();
     expect(loadConfig().env).toBe("production");
+  });
+
+  it("refuses a development Mailpit in production", () => {
+    process.env.NODE_ENV = "production";
+    process.env.MAILPIT_URL = "http://localhost:58025";
+    resetConfig();
+    expect(() => loadConfig()).toThrow(/MAILPIT_URL is for development only/);
+  });
+
+  it("only accepts a Mailpit on this machine", () => {
+    process.env.NODE_ENV = "development";
+    process.env.MAILPIT_URL = "http://mail.example.com:8025";
+    resetConfig();
+    expect(() => loadConfig()).toThrow(/MAILPIT_URL must be http:\/\/localhost/);
+    process.env.MAILPIT_URL = "http://localhost:58025/";
+    resetConfig();
+    expect(loadConfig().mail.mailpitUrl).toBe("http://localhost:58025");
+  });
+
+  it("never trusts every proxy, so clients can't choose their own IP", () => {
+    process.env.TRUST_PROXY = "true";
+    resetConfig();
+    expect(() => loadConfig()).toThrow(/TRUST_PROXY must name the proxies/);
+    process.env.TRUST_PROXY = "2";
+    resetConfig();
+    expect(loadConfig().trustProxy).toBe(2);
+    delete process.env.TRUST_PROXY;
+    resetConfig();
+    expect(loadConfig().trustProxy).toBe("loopback");
+  });
+});
+
+describe("health", () => {
+  it("answers without a session", async () => {
+    const { default: request } = await import("supertest");
+    const res = await request(app.getHttpServer())
+      .get("/health")
+      .set({ "x-minions-client": "health" })
+      .expect(200);
+    expect(res.body).toEqual({ ok: true });
   });
 });

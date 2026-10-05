@@ -1,0 +1,15 @@
+**/node_modules
+**/dist
+**/dist-e2e
+**/.env
+**/.env.*
+!**/.env.example
+**/*.log
+.git
+.turbo
+coverage
+apps/api/src/generated
+apps/desktop
+apps/extension
+tests
+scripts

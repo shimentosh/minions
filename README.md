@@ -30,6 +30,7 @@ Requirements: Node 22.12+, pnpm 11, Docker. Rust is needed only for the desktop 
 ```bash
 pnpm install
 pnpm db:up                                  # minions-postgres on :55440
+pnpm mail:up                                # minions-mailpit, inbox at http://localhost:58025
 cp apps/api/.env.example apps/api/.env      # then fill SERVER_ENCRYPTION_KEY and PRELOGIN_SECRET
 cp apps/web/.env.example apps/web/.env
 pnpm --filter @minions/core build
@@ -40,9 +41,11 @@ pnpm dev                                    # API on :4600, web on :5180
 Generate the two server keys with
 `node -e "console.log(require('crypto').randomBytes(32).toString('base64'))"`.
 Set `DEEPSEEK_API_KEY` to enable AI suggestions; without it, rules and learned
-preferences are used. Set `RESEND_API_KEY` and `MAIL_FROM` to send email
-verification links through [Resend](https://resend.com); without them, development
-skips sending (and production refuses to start).
+preferences are used. In development, email (verification links) goes to the
+local Mailpit set in `MAILPIT_URL`; open http://localhost:58025 to read it. In
+production, set `RESEND_API_KEY` and `MAIL_FROM` to send through
+[Resend](https://resend.com); production refuses to start without them, or with
+`MAILPIT_URL` set.
 
 **Chrome extension:** `pnpm --filter @minions/extension build`, then
 chrome://extensions → Developer mode → Load unpacked → `apps/extension/dist`.
@@ -51,6 +54,16 @@ chrome://extensions → Developer mode → Load unpacked → `apps/extension/dis
 **Desktop:** `pnpm --filter @minions/desktop dev` (runs the web dev server inside a
 Tauri window). For a different API origin, update `connect-src` in
 `apps/desktop/src-tauri/tauri.conf.json`.
+
+## Deploy
+
+[docker-compose.prod.yml](docker-compose.prod.yml) builds two services: `web`
+(nginx: the app, plus `/api/*` proxied to the API) and `api` (applies migrations
+on start). Only `web` is public: point the domain at it, container port 80.
+PostgreSQL 17 and Redis 7 run as separate services on the `dokploy-network`;
+set `DATABASE_URL` and `REDIS_URL` to their internal hostnames. The required
+variables are marked `:?` in the compose file. For the production checklist, see
+[SECURITY.md](SECURITY.md).
 
 ## Test
 

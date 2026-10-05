@@ -12,9 +12,39 @@ function key32(name: string): Buffer {
   return buf;
 }
 
+/** An optional http URL that must point at this machine, so mail can't be sent anywhere else. */
+function loopbackUrl(name: string): string | null {
+  const value = process.env[name];
+  if (!value) return null;
+  if (!/^http:\/\/(localhost|127\.0\.0\.1)(:\d+)?\/?$/.test(value))
+    throw new Error(`${name} must be http://localhost:<port> or http://127.0.0.1:<port>`);
+  return value.replace(/\/$/, "");
+}
+
+/**
+ * TRUST_PROXY: a hop count ("2") or Express subnet names/CIDRs
+ * ("loopback, uniquelocal"). Never "true": then any client could pick its own
+ * IP with X-Forwarded-For and dodge the rate limits.
+ */
+function trustProxySetting(): string | number {
+  const value = process.env.TRUST_PROXY?.trim() || "loopback";
+  if (/^\d+$/.test(value)) return Number(value);
+  if (/^(true|\*)$/i.test(value))
+    throw new Error(
+      "TRUST_PROXY must name the proxies (e.g. loopback, uniquelocal), not trust all",
+    );
+  return value;
+}
+
 export interface AppConfig {
   env: "development" | "production" | "test";
   port: number;
+  /**
+   * Express "trust proxy": which hops may set X-Forwarded-For, so `req.ip` is
+   * the client and not the reverse proxy. Rate limits, sessions and the
+   * activity log key on it. Behind Traefik and nginx in Docker: private ranges.
+   */
+  trustProxy: string | number;
   databaseUrl: string;
   webOrigins: string[];
   extensionOrigins: string[];
@@ -30,8 +60,16 @@ export interface AppConfig {
    * address that has no account yet. Empty = nobody.
    */
   operatorUserIds: string[];
-  /** Outgoing mail (email verification). `publicWebUrl` is where links in emails point. */
-  mail: { resendApiKey: string | null; from: string; publicWebUrl: string };
+  /**
+   * Outgoing mail (email verification). `publicWebUrl` is where links in emails point.
+   * `mailpitUrl` is a local Mailpit for development; production refuses to start with it.
+   */
+  mail: {
+    resendApiKey: string | null;
+    mailpitUrl: string | null;
+    from: string;
+    publicWebUrl: string;
+  };
 }
 
 let cached: AppConfig | null = null;
@@ -56,6 +94,7 @@ function assertProductionSafe(cfg: AppConfig) {
   if (cfg.webauthn.rpId === "localhost") problems.push("WEBAUTHN_RP_ID is localhost");
   if (!cfg.mail.resendApiKey)
     problems.push("RESEND_API_KEY is not set (email verification cannot work)");
+  if (process.env.MAILPIT_URL) problems.push("MAILPIT_URL is for development only");
   if (/@localhost>?$/.test(cfg.mail.from)) problems.push("MAIL_FROM is not a real sender address");
   if (!cfg.mail.publicWebUrl.startsWith("https://")) problems.push("PUBLIC_WEB_URL is not https");
   if (problems.length)
@@ -68,6 +107,7 @@ export function loadConfig(): AppConfig {
   cached = {
     env,
     port: Number(process.env.PORT ?? 4000),
+    trustProxy: trustProxySetting(),
     databaseUrl: env === "test" ? required("TEST_DATABASE_URL") : required("DATABASE_URL"),
     webOrigins: (process.env.WEB_ORIGINS ?? "")
       .split(",")
@@ -98,6 +138,7 @@ export function loadConfig(): AppConfig {
       .filter((s) => /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(s)),
     mail: {
       resendApiKey: process.env.RESEND_API_KEY || null,
+      mailpitUrl: loopbackUrl("MAILPIT_URL"),
       from: process.env.MAIL_FROM || "Minions <no-reply@localhost>",
       publicWebUrl: (
         process.env.PUBLIC_WEB_URL ||
