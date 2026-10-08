@@ -192,7 +192,33 @@ grant            workspace_item_grants.protected_item_key = RSA-OAEP(pub, itemKe
   confirmed in, with the same public-suffix-aware matching as personal items. The
   private key is held in `chrome.storage.session` next to the vault key.
 
-## 8. Operator dashboard
+## 8. Sharing items with people
+
+A personal item can be shared by email (`apps/api/src/people-sharing`,
+`apps/web/src/lib/people-sharing.ts`). Same primitives as workspaces, no workspace.
+
+- **Own key on first share.** The client generates an item key, re-encrypts every
+  secret field and every version under it (same AAD), and wraps it with the vault key
+  (`keyAad.itemKeyForVault`) into `vault_items.protectedItemKey`. The server checks, as
+  in rotation, that every secret comes back as an envelope. Unshared items are unchanged.
+- **Recipients.** `item_shares` holds one row per (item, email). For a verified account
+  with a key pair the client seals the item key at once (`sealContext.itemKey`). Anyone
+  else is emailed an invitation (`/register?email=`) and the row waits; once that address
+  is verified and has keys, the owner's client completes the seal on its next open
+  (`/people-shares/pending-seals`). Nothing reaches an unverified address.
+- **Recipient view.** `/shared` and `/shared/items/:id`: fields and the sealed key only;
+  no project, collection, tags, history or relations. `EDIT` permission may change fields,
+  name and description; the owner's filing is kept and the edit is logged for the owner.
+- **Expiry and removal.** Optional `expiresAt` (or never). Removing someone, or them
+  leaving, deletes the row and flags the item; the owner's client re-keys it right away
+  and re-seals to everyone who keeps access.
+- **Rotation, backup, extension.** Vault-key rotation re-wraps the item key and leaves
+  the fields alone; encrypted backups include `protectedItemKey`; the extension opens it.
+- **Known limits.** `GET /people-shares/lookup` tells a verified, unlocked user whether
+  an address has a verified account (rate limited). The server could substitute a public
+  key; the security code shown next to the recipient is the check.
+
+## 9. Operator dashboard
 
 `/operator` (API `apps/api/src/operator`) shows how the service is used: accounts,
 sign-ups per day, active accounts, items by type, imports by source, workspaces and
