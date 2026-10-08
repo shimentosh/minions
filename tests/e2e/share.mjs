@@ -27,7 +27,7 @@ try {
   await owner.getByLabel("Master password", { exact: true }).fill(pw);
   await owner.getByLabel("Confirm master password").fill(pw);
   await owner.getByRole("button", { name: "Create vault" }).click();
-  await owner.getByText("Everything sensitive, in one place.").waitFor({ timeout: 30_000 });
+  await owner.getByRole("navigation", { name: "Vault" }).waitFor({ timeout: 30_000 });
 
   // A login with 2FA.
   await owner.getByRole("button", { name: "New item" }).first().click();

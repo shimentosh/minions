@@ -64,7 +64,7 @@ async function person(label, name, email) {
   await page.getByLabel("Master password", { exact: true }).fill(password);
   await page.getByLabel("Confirm master password").fill(password);
   await page.getByRole("button", { name: "Create vault" }).click();
-  await page.getByText("Everything sensitive, in one place.").waitFor({ timeout: 30_000 });
+  await page.getByRole("navigation", { name: "Vault" }).waitFor({ timeout: 30_000 });
   return { page, nav, shot, email };
 }
 

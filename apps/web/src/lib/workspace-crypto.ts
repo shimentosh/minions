@@ -79,7 +79,7 @@ export async function openItemKey(item: WorkspaceItemDetail) {
       keyAad.itemKeyForWorkspace(item.workspaceId, item.id),
     );
   }
-  registerItemKey(item.id, item.workspaceId, key);
+  registerItemKey(item.id, { kind: "workspace", workspaceId: item.workspaceId }, key);
   return key;
 }
 
@@ -172,7 +172,7 @@ export async function buildAccess(opts: {
 /** A fresh key for a new item, registered so encryptDraft uses it. */
 export function newItemKey(workspaceId: string, itemId: string) {
   const key = generateKey();
-  registerItemKey(itemId, workspaceId, key);
+  registerItemKey(itemId, { kind: "workspace", workspaceId }, key);
   return key;
 }
 
@@ -247,7 +247,7 @@ export async function rekeyItem(item: WorkspaceItemDetail, access: ItemAccessRes
   // Registering the new key wipes the old buffer; keep a copy in case the server refuses.
   const previous = new Uint8Array(oldKey);
   const next = generateKey();
-  registerItemKey(item.id, ws, next);
+  registerItemKey(item.id, { kind: "workspace", workspaceId: ws }, next);
   try {
     const body = await encryptDraft({
       id: item.id,
@@ -284,7 +284,7 @@ export async function rekeyItem(item: WorkspaceItemDetail, access: ItemAccessRes
     await post(`/workspaces/${ws}/items/${item.id}/rekey`, { item: body, access: accessBody });
   } catch (e) {
     // Nothing changed on the server: keep using the old key.
-    registerItemKey(item.id, ws, previous);
+    registerItemKey(item.id, { kind: "workspace", workspaceId: ws }, previous);
     throw e;
   }
   wipe(previous);

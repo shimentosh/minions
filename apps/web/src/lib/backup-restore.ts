@@ -5,6 +5,7 @@ import {
   deriveMasterKeys,
   type FieldKind,
   type KdfParams,
+  keyAad,
   type UpsertItemRequest,
   unwrapKey,
   wipe,
@@ -43,6 +44,8 @@ export interface MinionsBackup {
     favorite: boolean;
     tags: string[];
     usedByProjectIds: string[];
+    /** Items shared with people: their own key, wrapped by the backup's vault key. */
+    protectedItemKey?: string | null;
     fields: BackupField[];
     deletedAt: string | null;
   }[];
@@ -185,9 +188,16 @@ export async function restoreBackup(
     ): Promise<UpsertItemRequest> {
       const values: Record<string, string> = {};
       const custom: CustomFieldInput[] = [];
+      const fieldKey = item.protectedItemKey
+        ? await unwrapKey(
+            backupKey,
+            item.protectedItemKey,
+            keyAad.itemKeyForVault(backup.keys.vaultId, item.id),
+          )
+        : backupKey;
       for (const f of item.fields) {
         values[f.key] = f.sensitive
-          ? await decryptString(backupKey, f.value, aad.field(item.id, f.key))
+          ? await decryptString(fieldKey, f.value, aad.field(item.id, f.key))
           : f.value;
         if (f.label)
           custom.push({
@@ -197,6 +207,7 @@ export async function restoreBackup(
             kind: (f.kind ?? "text") as FieldKind,
           });
       }
+      if (fieldKey !== backupKey) wipe(fieldKey);
       return encryptDraft({
         id,
         type: item.type,

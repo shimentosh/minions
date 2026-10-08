@@ -199,12 +199,15 @@ export function PublicSharePage() {
                   <>
                     <div className="flex flex-wrap gap-3 text-muted-foreground text-xs">
                       <span className="flex items-center gap-1">
-                        <Clock className="size-3.5" /> Expires {until(meta.expiresAt)}
+                        <Clock className="size-3.5" />{" "}
+                        {meta.expiresAt ? `Expires ${until(meta.expiresAt)}` : "Never expires"}
                       </span>
                       <span className="flex items-center gap-1">
                         <Eye className="size-3.5" />
                         {meta.viewsLeft === null
-                          ? "Can be opened until then"
+                          ? meta.expiresAt
+                            ? "Can be opened until then"
+                            : "Can be opened until the sender revokes it"
                           : meta.viewsLeft === 1
                             ? "Can be opened once"
                             : `${meta.viewsLeft} views left`}

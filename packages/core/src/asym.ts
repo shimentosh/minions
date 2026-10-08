@@ -2,7 +2,7 @@ import { DecryptionError, decryptBytes, encryptBytes } from "./crypto";
 import { fromBase64, toBase64, toHex, utf8 } from "./encoding";
 
 /**
- * Public-key cryptography for sharing inside a workspace. See ARCHITECTURE.md §7.
+ * Public-key cryptography for sharing (workspaces, and items shared with people). See ARCHITECTURE.md §7–8.
  *
  * Each user has an RSA-OAEP-3072 (SHA-256) key pair. The public key is stored
  * in the clear; the private key is stored wrapped by the user key, so only
@@ -46,6 +46,8 @@ export const keyAad = {
   /** An item's key wrapped by its workspace key ("everyone in the workspace"). */
   itemKeyForWorkspace: (workspaceId: string, itemId: string) =>
     `workspace:${workspaceId}:item:${itemId}:key`,
+  /** A personal item's own key (items shared with people), wrapped by the owner's vault key. */
+  itemKeyForVault: (vaultId: string, itemId: string) => `vault:${vaultId}:item:${itemId}:key`,
 };
 
 export interface UserKeyPair {

@@ -6,7 +6,6 @@ import type {
   NoteSummary,
   Page,
   SecurityOverview,
-  VaultItemDetail,
   VaultItemSummary,
 } from "@minions/core";
 import {
@@ -17,6 +16,7 @@ import {
   useQueryClient,
 } from "@tanstack/react-query";
 import { del, get, patch, post } from "./api";
+import { loadPersonalItem } from "./people-sharing";
 import { useSession } from "./session";
 
 export interface ItemFilters {
@@ -56,7 +56,8 @@ export function useItem(id: string | undefined) {
   return useQuery({
     queryKey: ["item", id],
     enabled: !!id && unlocked(),
-    queryFn: () => get<VaultItemDetail>(`/vault/items/${id}`),
+    // An item shared with people has its own key: open it before anything decrypts.
+    queryFn: () => loadPersonalItem(id!),
     staleTime: 0,
   });
 }
@@ -177,9 +178,12 @@ export function useInvalidateVault() {
       qc.invalidateQueries({ queryKey: ["dashboard"] }),
       qc.invalidateQueries({ queryKey: ["security"] }),
       qc.invalidateQueries({ queryKey: ["projects"] }),
+      qc.invalidateQueries({ queryKey: ["project"] }),
       qc.invalidateQueries({ queryKey: ["collections"] }),
       qc.invalidateQueries({ queryKey: ["tags"] }),
       qc.invalidateQueries({ queryKey: ["ws"] }),
+      qc.invalidateQueries({ queryKey: ["shared"] }),
+      qc.invalidateQueries({ queryKey: ["people"] }),
     ]);
 }
 
@@ -204,6 +208,22 @@ export function useRestoreItem() {
   const invalidate = useInvalidateVault();
   return useMutation({
     mutationFn: (id: string) => post(`/vault/items/${id}/restore`),
+    onSuccess: invalidate,
+  });
+}
+
+export interface BulkPatch {
+  favorite?: boolean;
+  projectId?: string | null;
+  collectionId?: string | null;
+  addTags?: string[];
+}
+
+/** Organises many items at once. Only plaintext metadata changes; nothing is re-encrypted. */
+export function usePatchItems() {
+  const invalidate = useInvalidateVault();
+  return useMutation({
+    mutationFn: (body: BulkPatch & { ids: string[] }) => patch("/vault/items/bulk", body),
     onSuccess: invalidate,
   });
 }

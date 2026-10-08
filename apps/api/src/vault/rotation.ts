@@ -91,6 +91,11 @@ class RotatedItemDto {
   @Type(() => VersionDto)
   versions!: VersionDto[];
   @IsOptional() @Matches(/^[0-9a-f]{64}$/) passwordFingerprint?: string;
+  /**
+   * Items shared with people have their own key: only that key is re-wrapped
+   * under the new vault key, and fields and versions are sent empty.
+   */
+  @IsOptional() @Matches(ENVELOPE) @MaxLength(200) protectedItemKey?: string;
 }
 
 class NoteVersionDto {
@@ -211,6 +216,7 @@ export class RotationService {
           id: true,
           type: true,
           passwordFingerprint: true,
+          protectedItemKey: true,
           fields: { where: { sensitive: true }, select: { key: true, value: true } },
           versions: { select: { id: true, fields: true } },
         },
@@ -220,8 +226,9 @@ export class RotationService {
           id: r.id,
           type: r.type,
           hasPasswordFingerprint: r.passwordFingerprint !== null,
+          protectedItemKey: r.protectedItemKey,
           fields: r.fields,
-          versions: r.versions.map((v) => ({
+          versions: (r.protectedItemKey ? [] : r.versions).map((v) => ({
             id: v.id,
             fields: (v.fields as unknown as VersionField[])
               .filter((f) => f.sensitive)
@@ -262,6 +269,7 @@ export class RotationService {
         select: {
           keyGen: true,
           passwordFingerprint: true,
+          protectedItemKey: true,
           fields: { where: { sensitive: true }, select: { key: true } },
           versions: { select: { id: true, fields: true } },
         },
@@ -269,6 +277,23 @@ export class RotationService {
       if (!row) throw new BadRequestException("Unknown item");
       if (row.keyGen >= target) {
         skipped++;
+        continue;
+      }
+      if (row.protectedItemKey) {
+        // Its fields stay under the item key; only the wrapped key moves.
+        if (!item.protectedItemKey || item.fields.length || item.versions.length)
+          throw new BadRequestException("A shared item's key must be re-wrapped, nothing else");
+        const r = await this.prisma.vaultItem.updateMany({
+          where: { id: item.id, vaultId: vault.id, keyGen: { lt: target } },
+          data: {
+            keyGen: target,
+            protectedItemKey: item.protectedItemKey,
+            passwordFingerprint:
+              row.passwordFingerprint !== null ? (item.passwordFingerprint ?? null) : null,
+          },
+        });
+        if (r.count === 1) done++;
+        else skipped++;
         continue;
       }
       assertSameSecrets(
@@ -386,7 +411,7 @@ export class RotationService {
   }
 }
 
-function assertSameSecrets(expected: string[], sent: { key: string; value: string }[]) {
+export function assertSameSecrets(expected: string[], sent: { key: string; value: string }[]) {
   const keys = new Set(sent.map((f) => f.key));
   if (
     keys.size !== sent.length ||

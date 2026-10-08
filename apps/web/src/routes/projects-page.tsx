@@ -2,6 +2,7 @@ import type { ItemCategory } from "@minions/core";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useNavigate, useParams } from "@tanstack/react-router";
 import { Archive, FolderKanban, MoreHorizontal, NotebookText, Plus, Trash2 } from "lucide-react";
+import { useEffect } from "react";
 import { NewGroupDialog } from "@/components/layout/new-group-dialog";
 import { EmptyNote, Page, PageBody, Section } from "@/components/layout/page";
 import { Badge } from "@/components/ui/badge";
@@ -15,10 +16,11 @@ import {
 } from "@/components/ui/empty";
 import { Menu, MenuItem, MenuPopup, MenuTrigger } from "@/components/ui/menu";
 import { Skeleton } from "@/components/ui/skeleton";
+import { ItemRow } from "@/components/vault/item-row";
+import { BulkBar } from "@/components/vault/organize";
 import { del, errorMessage, get, patch } from "@/lib/api";
 import { timeAgo } from "@/lib/format";
-import { ItemGlyph } from "@/lib/item-icons";
-import { useProjects } from "@/lib/queries";
+import { useItems, useProjects } from "@/lib/queries";
 import { toast } from "@/lib/toast";
 import { useUi } from "@/lib/ui-store";
 
@@ -149,6 +151,15 @@ export function ProjectPage() {
     queryFn: () => get<ProjectDetail>(`/projects/${projectId}`),
   });
 
+  // Full summaries (project and collection chips, favorites) for the shared rows.
+  const summaries = useItems({ projectId });
+  useEffect(() => {
+    if (summaries.hasNextPage && !summaries.isFetchingNextPage) void summaries.fetchNextPage();
+  }, [summaries]);
+  const full = new Map(
+    (summaries.data?.pages.flatMap((pg) => pg.items) ?? []).map((i) => [i.id, i]),
+  );
+
   const archive = useMutation({
     mutationFn: () => patch(`/projects/${projectId}`, { archived: !project?.archived }),
     onSuccess: () => {
@@ -174,6 +185,7 @@ export function ProjectPage() {
       </Page>
     );
 
+  const rows = project.items.flatMap((i) => full.get(i.id) ?? []);
   const remaining = [...project.items];
   const grouped = GROUPS.map((g) => {
     const items = remaining.filter(g.match);
@@ -182,7 +194,11 @@ export function ProjectPage() {
   }).filter((g) => g.items.length > 0);
 
   return (
-    <Page title={project.name} crumbs={[{ label: "Projects", to: "/projects" }]}>
+    <Page
+      title={project.name}
+      crumbs={[{ label: "Projects", to: "/projects" }]}
+      className="relative"
+    >
       <PageBody
         title={
           <span className="flex items-center gap-2">
@@ -226,37 +242,20 @@ export function ProjectPage() {
               title={g.title}
               hint={`${g.items.length} item${g.items.length === 1 ? "" : "s"}`}
             >
-              {g.items.map((i) => (
-                <Link
-                  key={i.id}
-                  to="/vault"
-                  search={{ item: i.id }}
-                  className="flex items-center gap-2.5 rounded-lg px-1.5 py-1.5 hover:bg-accent/60"
-                >
-                  <ItemGlyph type={i.type} className="size-7 [&_svg]:size-3.5" />
-                  <span className="min-w-0 flex-1">
-                    <span className="block truncate text-sm">{i.name}</span>
-                    {i.subtitle && (
-                      <span className="block truncate text-muted-foreground text-xs">
-                        {i.subtitle}
-                      </span>
-                    )}
-                  </span>
-                  {i.environment && (
-                    <Badge
-                      variant={i.environment === "Production" ? "warning" : "secondary"}
-                      size="sm"
-                    >
-                      {i.environment}
-                    </Badge>
-                  )}
-                  {i.shared && (
-                    <Badge variant="outline" size="sm">
-                      shared
-                    </Badge>
-                  )}
-                </Link>
-              ))}
+              {g.items.map((i) => {
+                const item = full.get(i.id);
+                return item ? (
+                  <ItemRow
+                    key={i.id}
+                    item={item}
+                    list={rows}
+                    active={false}
+                    onOpen={() => void navigate({ to: "/vault", search: { item: i.id } })}
+                  />
+                ) : (
+                  <Skeleton key={i.id} className="h-14 rounded-lg" />
+                );
+              })}
             </Section>
           ))}
           <Section
@@ -290,6 +289,7 @@ export function ProjectPage() {
           </Section>
         </div>
       </PageBody>
+      <BulkBar items={rows} />
     </Page>
   );
 }

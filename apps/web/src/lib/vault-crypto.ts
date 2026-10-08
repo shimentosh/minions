@@ -12,11 +12,11 @@ import {
   type UpsertItemRequest,
   type VaultItemDetail,
 } from "@minions/core";
-import { itemKeyFor } from "./item-keys";
+import { itemKeyFor, scopeOf } from "./item-keys";
 import { requireVaultKey } from "./session";
 
-/** A workspace item's own key when this client opened one, else the personal vault key. */
-function keyFor(itemId: string) {
+/** An item's own key when this client opened one (workspace, shared), else the personal vault key. */
+export function keyFor(itemId: string) {
   return itemKeyFor(itemId) ?? requireVaultKey();
 }
 
@@ -102,8 +102,10 @@ export async function encryptDraft(
   const pw = def.passwordField ? draft.values[def.passwordField] : undefined;
   if (pw) {
     signals.passwordStrength = estimateStrength(pw).score;
-    // Reuse detection compares personal passwords only.
-    if (!itemKeyFor(draft.id)) signals.passwordFingerprint = await secretFingerprint(key, pw);
+    // Reuse detection compares the user's own passwords only, keyed by their vault key.
+    const scope = scopeOf(draft.id);
+    if (!scope || scope.kind === "personal")
+      signals.passwordFingerprint = await secretFingerprint(requireVaultKey(), pw);
   }
   if (draft.type === "CREDIT_CARD" && draft.values.number) {
     const digits = draft.values.number.replace(/\D/g, "");

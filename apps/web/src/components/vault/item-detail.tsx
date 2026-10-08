@@ -14,14 +14,17 @@ import { Link } from "@tanstack/react-router";
 import {
   ArchiveRestore,
   Eye,
+  FolderKanban,
   History,
   KeyRound,
+  Layers,
   Link2,
   MoreHorizontal,
   Pencil,
   Star,
   Trash2,
   User,
+  Users,
   X,
 } from "lucide-react";
 import { useState } from "react";
@@ -33,6 +36,7 @@ import { del, errorMessage, get, post } from "@/lib/api";
 import { copySecret } from "@/lib/clipboard";
 import { ACTION_LABELS, shortDate, timeAgo } from "@/lib/format";
 import { ItemGlyph } from "@/lib/item-icons";
+import { loadPersonalItem } from "@/lib/people-sharing";
 import {
   useActivity,
   useDeleteItem,
@@ -41,12 +45,12 @@ import {
   useRestoreItem,
   useToggleFavorite,
 } from "@/lib/queries";
-import { requireVaultKey } from "@/lib/session";
 import { toast } from "@/lib/toast";
 import { useUi } from "@/lib/ui-store";
-import { revealField } from "@/lib/vault-crypto";
+import { keyFor, revealField } from "@/lib/vault-crypto";
 import { FieldRow } from "./field-row";
 import { ItemPicker } from "./item-picker";
+import { useMoveDialog } from "./organize";
 import { ShareItemDialog } from "./share-dialog";
 
 export function Meta({ label, value }: { label: string; value: React.ReactNode }) {
@@ -87,7 +91,7 @@ function VersionRow({ item, version }: { item: VaultItemDetail; version: ItemVer
     for (const f of version.fields) {
       try {
         out[f.key] = f.sensitive
-          ? await decryptString(requireVaultKey(), f.value, aad.version(item.id, f.key))
+          ? await decryptString(keyFor(item.id), f.value, aad.version(item.id, f.key))
           : f.value;
       } catch {
         out[f.key] = "(could not decrypt)";
@@ -257,7 +261,7 @@ function RelationsBlock({ item }: { item: VaultItemDetail }) {
 function LinkedLoginCopy({ loginId }: { loginId: string }) {
   async function copy(keys: string[], label: string) {
     try {
-      const login = await get<VaultItemDetail>(`/vault/items/${loginId}`);
+      const login = await loadPersonalItem(loginId);
       const field = keys.map((k) => login.fields.find((f) => f.key === k)).find(Boolean);
       if (!field) return toast.info(`${login.name} has no ${label.toLowerCase()}`);
       await copySecret(await revealField(login.id, field), {
@@ -322,6 +326,7 @@ export function ItemDetail({ id, onClose }: { id: string; onClose?: () => void }
   const [sharing, setSharing] = useState(false);
   const { data: item, isLoading, error } = useItem(id);
   const openEditor = useUi((s) => s.openEditor);
+  const openMove = useMoveDialog((s) => s.open);
   const favorite = useToggleFavorite();
   const remove = useDeleteItem();
   const restore = useRestoreItem();
@@ -396,6 +401,15 @@ export function ItemDetail({ id, onClose }: { id: string; onClose?: () => void }
                 In trash
               </Badge>
             )}
+            {!!item.sharedWith && !item.deletedAt && (
+              <Badge
+                variant="info"
+                size="sm"
+                render={<button type="button" onClick={() => setSharing(true)} />}
+              >
+                <Users /> Shared with {item.sharedWith}
+              </Badge>
+            )}
           </div>
         </div>
         <div className="flex shrink-0 items-center gap-1">
@@ -409,7 +423,7 @@ export function ItemDetail({ id, onClose }: { id: string; onClose?: () => void }
           </Button>
           {!item.deletedAt && (
             <Button variant="outline" size="sm" onClick={() => setSharing(true)}>
-              <Link2 /> Share
+              <Users /> Share
             </Button>
           )}
           {!item.deletedAt && (
@@ -435,19 +449,28 @@ export function ItemDetail({ id, onClose }: { id: string; onClose?: () => void }
                   </MenuItem>
                 </>
               ) : (
-                <MenuItem
-                  variant="destructive"
-                  onClick={() =>
-                    remove.mutate(item.id, {
-                      onSuccess: () => {
-                        toast.success("Moved to trash");
-                        onClose?.();
-                      },
-                    })
-                  }
-                >
-                  <Trash2 /> Move to trash
-                </MenuItem>
+                <>
+                  <MenuItem onClick={() => openMove("project", [item])}>
+                    <FolderKanban /> Move to project…
+                  </MenuItem>
+                  <MenuItem onClick={() => openMove("collection", [item])}>
+                    <Layers /> Move to collection…
+                  </MenuItem>
+                  <MenuSeparator />
+                  <MenuItem
+                    variant="destructive"
+                    onClick={() =>
+                      remove.mutate(item.id, {
+                        onSuccess: () => {
+                          toast.success("Moved to trash");
+                          onClose?.();
+                        },
+                      })
+                    }
+                  >
+                    <Trash2 /> Move to trash
+                  </MenuItem>
+                </>
               )}
             </MenuPopup>
           </Menu>

@@ -147,7 +147,13 @@ function itemRow(item: ListedItem, tabId: number | undefined, canFill: boolean) 
     const fill = h("button", {}, "Fill");
     fill.addEventListener("click", () =>
       act(async () => {
-        await send({ type: "fill", tabId, itemId: item.id, workspaceId: item.workspaceId });
+        await send({
+          type: "fill",
+          tabId,
+          itemId: item.id,
+          workspaceId: item.workspaceId,
+          shared: item.shared,
+        });
         window.close();
       }, fill),
     );
@@ -162,6 +168,7 @@ function itemRow(item: ListedItem, tabId: number | undefined, canFill: boolean) 
           itemId: item.id,
           field: "username",
           workspaceId: item.workspaceId,
+          shared: item.shared,
         }),
         "Username",
       ),
@@ -176,6 +183,7 @@ function itemRow(item: ListedItem, tabId: number | undefined, canFill: boolean) 
           itemId: item.id,
           field: "password",
           workspaceId: item.workspaceId,
+          shared: item.shared,
         }),
         "Password",
       ),
@@ -190,6 +198,7 @@ function itemRow(item: ListedItem, tabId: number | undefined, canFill: boolean) 
           type: "totp",
           itemId: item.id,
           workspaceId: item.workspaceId,
+          shared: item.shared,
         });
         await copy(r.code, `Code ${r.code.slice(0, 3)} ${r.code.slice(3)} (${r.remaining}s)`);
       }),
@@ -207,8 +216,12 @@ function itemRow(item: ListedItem, tabId: number | undefined, canFill: boolean) 
         "div",
         { class: "name" },
         item.name,
-        // Team logins say where they come from (textContent only, like everything here).
-        item.workspaceName ? h("span", { class: "team" }, item.workspaceName) : null,
+        // Team and shared logins say where they come from (textContent only, like everything here).
+        item.workspaceName
+          ? h("span", { class: "team" }, item.workspaceName)
+          : item.sharedBy
+            ? h("span", { class: "team" }, `from ${item.sharedBy}`)
+            : null,
       ),
       h("div", { class: "sub" }, item.subtitle ?? item.host ?? ""),
     ),

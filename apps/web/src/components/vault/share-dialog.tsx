@@ -13,7 +13,7 @@ import {
   type VaultItemDetail,
 } from "@minions/core";
 import { useQueryClient } from "@tanstack/react-query";
-import { Check, Copy, Link2, ShieldAlert, Timer } from "lucide-react";
+import { Check, Copy, Link2, ShieldAlert, Timer, Users } from "lucide-react";
 import { useState } from "react";
 import { PasswordInput } from "@/components/auth/auth-screens";
 import { SimpleSelect } from "@/components/simple-select";
@@ -30,12 +30,14 @@ import {
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
+import { Tabs, TabsList, TabsTab } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
 import { errorMessage, post } from "@/lib/api";
 import { fieldIcon } from "@/lib/field-icons";
 import { useSession } from "@/lib/session";
 import { toast } from "@/lib/toast";
 import { revealField } from "@/lib/vault-crypto";
+import { PeopleSharePanel } from "./people-share-panel";
 
 export const EXPIRY_OPTIONS = [
   { value: "15", label: "15 minutes" },
@@ -43,12 +45,13 @@ export const EXPIRY_OPTIONS = [
   { value: "1440", label: "1 day" },
   { value: "10080", label: "7 days" },
   { value: "43200", label: "30 days" },
+  { value: "0", label: "Never" },
 ];
 export const VIEW_OPTIONS = [
   { value: "1", label: "One view only" },
   { value: "3", label: "3 views" },
   { value: "10", label: "10 views" },
-  { value: "0", label: "Until it expires" },
+  { value: "0", label: "No limit" },
 ];
 
 /** Encrypts a payload under a fresh link key, uploads the ciphertext, returns the link. */
@@ -133,15 +136,24 @@ export function ShareResult({
   );
 }
 
+export type ShareMode = "people" | "link";
+
+/**
+ * Share an item: with people by email (they keep access in their own vault,
+ * until you remove it or it expires), or as a one-off link anyone can open.
+ */
 export function ShareItemDialog({
   item,
   open,
   onOpenChange,
+  initialMode = "people",
 }: {
   item: VaultItemDetail;
   open: boolean;
   onOpenChange: (o: boolean) => void;
+  initialMode?: ShareMode;
 }) {
+  const [mode, setMode] = useState<ShareMode>(initialMode);
   const me = useSession((s) => s.me);
   const qc = useQueryClient();
   const shareable = item.fields.filter((f) => f.key !== "totp");
@@ -219,15 +231,31 @@ export function ShareItemDialog({
       <DialogPopup className="max-w-lg">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
-            <Link2 className="size-4" /> Share “{item.name}”
+            {mode === "people" ? <Users className="size-4" /> : <Link2 className="size-4" />} Share
+            “{item.name}”
           </DialogTitle>
           <DialogDescription>
-            Anyone with the link can open it, without a Minions account, until it expires or runs
-            out of views.
+            {mode === "people"
+              ? "Share with someone by email. It appears in their Minions, stays up to date when you change it, and you can remove it any time."
+              : "Anyone with the link can open it, without a Minions account, until it expires or runs out of views."}
           </DialogDescription>
         </DialogHeader>
         <DialogPanel className="space-y-4">
-          {url ? (
+          {!url && (
+            <Tabs value={mode} onValueChange={(v) => setMode(v as ShareMode)}>
+              <TabsList className="w-full">
+                <TabsTab value="people">
+                  <Users /> People
+                </TabsTab>
+                <TabsTab value="link">
+                  <Link2 /> Link
+                </TabsTab>
+              </TabsList>
+            </Tabs>
+          )}
+          {mode === "people" ? (
+            <PeopleSharePanel item={item} />
+          ) : url ? (
             <ShareResult
               url={url}
               passphrase={usePassphrase ? passphrase : undefined}
@@ -320,7 +348,7 @@ export function ShareItemDialog({
             </>
           )}
         </DialogPanel>
-        {!url && (
+        {!url && mode === "link" && (
           <DialogFooter>
             <Button variant="ghost" onClick={() => onOpenChange(false)}>
               Cancel

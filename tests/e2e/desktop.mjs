@@ -57,7 +57,7 @@ try {
   await app.page.getByLabel("Master password", { exact: true }).fill(password);
   await app.page.getByLabel("Confirm master password").fill(password);
   await app.page.getByRole("button", { name: "Create vault" }).click();
-  await app.page.getByText("Everything sensitive, in one place.").waitFor({ timeout: 30_000 });
+  await app.page.getByRole("navigation", { name: "Vault" }).waitFor({ timeout: 30_000 });
   check(true, "desktop app: registered and unlocked");
   await app.page.screenshot({
     path: process.argv[2]
@@ -71,7 +71,7 @@ try {
   check(true, "relaunch: still signed in (token from the OS keychain), vault locked");
   await app.page.getByLabel("Master password").fill(password);
   await app.page.getByRole("button", { name: "Unlock" }).click();
-  await app.page.getByText("Everything sensitive, in one place.").waitFor({ timeout: 30_000 });
+  await app.page.getByRole("navigation", { name: "Vault" }).waitFor({ timeout: 30_000 });
   check(true, "relaunch: unlocks with the master password");
 
   await app.page.getByRole("button", { name: "Account menu" }).click();

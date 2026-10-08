@@ -68,6 +68,8 @@ model User {
   itemGrants          WorkspaceItemGrant[]           @relation("GrantUser")
   itemFavorites       WorkspaceItemFavorite[]
   createdItems        VaultItem[]                    @relation("ItemCreator")
+  sharesGiven         ItemShare[]                    @relation("ShareOwner")
+  sharesReceived      ItemShare[]                    @relation("ShareRecipient")
 
   @@map("users")
 }
@@ -292,10 +294,11 @@ model VaultItem {
   createdAt      DateTime  @default(now())
   updatedAt      DateTime  @updatedAt
 
-  // Workspace items only (see ARCHITECTURE.md §7).
+  // Workspace items (see ARCHITECTURE.md §7), and personal items shared with people (§8).
   /// Everyone confirmed in the workspace may open it.
   workspaceShared  Boolean @default(false)
-  /// When workspaceShared: the item key wrapped by the workspace key (AES-GCM envelope).
+  /// Workspace items, when workspaceShared: the item key wrapped by the workspace key.
+  /// Personal items shared with people: the item key wrapped by the vault key. Null: fields are under the vault key.
   protectedItemKey String?
   createdById      String? @db.Uuid
   /// Someone who held this item's key lost access; a manager should rotate it.
@@ -305,6 +308,7 @@ model VaultItem {
   createdBy     User?                   @relation("ItemCreator", fields: [createdById], references: [id], onDelete: SetNull)
   grants        WorkspaceItemGrant[]
   favoritedBy   WorkspaceItemFavorite[]
+  peopleShares  ItemShare[]
   project       Project?                @relation(fields: [projectId], references: [id], onDelete: SetNull)
   collection    Collection?             @relation(fields: [collectionId], references: [id], onDelete: SetNull)
   fields        VaultItemField[]
@@ -592,7 +596,8 @@ model Share {
   /// What the owner sees in their list ("GitHub"). Not shown to recipients.
   label          String
   ciphertext     String?
-  expiresAt      DateTime
+  /// null = never expires.
+  expiresAt      DateTime?
   /// null = until it expires.
   maxViews       Int?
   viewCount      Int       @default(0)
@@ -609,6 +614,46 @@ model Share {
   @@index([userId, createdAt])
   @@index([expiresAt])
   @@map("shares")
+}
+
+enum PeoplePermission {
+  VIEW
+  EDIT
+}
+
+/// A personal item shared with one person, by email. The owner's client seals
+/// the item key to the recipient's public key; until it can (no account, an
+/// unverified email, or no sharing keys yet) sealedItemKey is null and the
+/// share waits. Revoking deletes the row. See ARCHITECTURE.md §8.
+model ItemShare {
+  id              String           @id @default(uuid()) @db.Uuid
+  itemId          String           @db.Uuid
+  ownerId         String           @db.Uuid
+  /// Lowercased. Who it is for, whether or not they have an account yet.
+  email           String
+  /// Set once the share is sealed to an account with this (verified) email.
+  recipientId     String?          @db.Uuid
+  permission      PeoplePermission @default(VIEW)
+  /// The item key sealed to the recipient (sealContext.itemKey). Null while pending.
+  sealedItemKey   String?
+  /// null = never expires.
+  expiresAt       DateTime?
+  createdAt       DateTime         @default(now())
+  sealedAt        DateTime?
+  /// First time the recipient opened it ("New" until then).
+  seenAt          DateTime?
+  /// When the invitation or notification email was last sent.
+  notifiedAt      DateTime?
+
+  item      VaultItem @relation(fields: [itemId], references: [id], onDelete: Cascade)
+  owner     User      @relation("ShareOwner", fields: [ownerId], references: [id], onDelete: Cascade)
+  recipient User?     @relation("ShareRecipient", fields: [recipientId], references: [id], onDelete: Cascade)
+
+  @@unique([itemId, email])
+  @@index([ownerId, createdAt])
+  @@index([email])
+  @@index([recipientId])
+  @@map("item_shares")
 }
 
 // ─── Imports ─────────────────────────────────────────────────────────────────

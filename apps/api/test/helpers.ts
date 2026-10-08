@@ -43,6 +43,7 @@ export async function createApp(): Promise<{ app: INestApplication; prisma: Pris
 }
 
 const TABLES = [
+  "item_shares",
   "workspace_item_favorites",
   "workspace_item_grants",
   "workspace_members",

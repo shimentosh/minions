@@ -2,28 +2,24 @@ import type { FindingType, VaultItemSummary } from "@minions/core";
 import { Link, useNavigate } from "@tanstack/react-router";
 import {
   Activity,
-  ChevronRight,
   Clock,
   FolderKanban,
   type LucideIcon,
   MonitorSmartphone,
   PencilLine,
-  Plus,
   SearchIcon,
   ShieldAlert,
   ShieldCheck,
-  Sparkles,
 } from "lucide-react";
 import { useState } from "react";
-import { EmptyNote, Page, PageBody, Section } from "@/components/layout/page";
-import { Button } from "@/components/ui/button";
+import { EmptyNote, Page } from "@/components/layout/page";
 import { Skeleton } from "@/components/ui/skeleton";
+import { useDropTarget } from "@/components/vault/organize";
 import { cn } from "@/lib/cn";
 import { ACTION_LABELS, firstName, greeting, timeAgo } from "@/lib/format";
 import { ItemGlyph } from "@/lib/item-icons";
 import { useDashboard, useSecurity } from "@/lib/queries";
 import { useSession } from "@/lib/session";
-import { useUi } from "@/lib/ui-store";
 
 type Tone = "default" | "good" | "warn" | "danger";
 const TONE: Record<Tone, string> = {
@@ -100,14 +96,75 @@ const ATTENTION: [FindingType, string][] = [
   ["duplicate", "possible duplicates"],
 ];
 
+/** A project on Home: opens it, and takes items dropped on it. */
+function ProjectTile({
+  p,
+}: {
+  p: { id: string; name: string; color?: string | null; itemCount: number };
+}) {
+  const drop = useDropTarget({ kind: "project", id: p.id, name: p.name });
+  return (
+    <Link
+      ref={drop.setNodeRef}
+      to="/projects/$projectId"
+      params={{ projectId: p.id }}
+      className={cn(
+        "flex items-center gap-2.5 rounded-lg border border-border/70 px-3 py-2 transition-colors hover:bg-accent/40",
+        drop.dragging && "border-dashed",
+        drop.isOver && "border-primary/60 bg-primary/8",
+      )}
+    >
+      <span
+        className="flex size-7 shrink-0 items-center justify-center rounded-lg"
+        style={{ background: `${p.color ?? "#64748b"}22`, color: p.color ?? undefined }}
+      >
+        <FolderKanban className="size-3.5" />
+      </span>
+      <span className="min-w-0 flex-1 truncate text-sm">{p.name}</span>
+      <span className="text-muted-foreground text-xs tabular-nums">{p.itemCount}</span>
+    </Link>
+  );
+}
+
+const linkCls = "text-muted-foreground text-xs hover:text-foreground";
+
+/** A Home card whose list scrolls inside it, so the page itself fits the screen. */
+function Card({
+  title,
+  action,
+  children,
+  className,
+}: {
+  title: React.ReactNode;
+  action?: React.ReactNode;
+  children: React.ReactNode;
+  className?: string;
+}) {
+  return (
+    <section
+      className={cn(
+        "flex min-h-64 min-w-0 flex-col rounded-xl border border-border bg-card lg:min-h-0",
+        className,
+      )}
+    >
+      <div className="flex h-11 shrink-0 items-center justify-between gap-2 border-border/60 border-b px-4">
+        <h2 className="font-semibold text-sm">{title}</h2>
+        {action}
+      </div>
+      <div className="min-h-0 flex-1 overflow-y-auto p-2">{children}</div>
+    </section>
+  );
+}
+
+type Quick = "favorites" | "recent" | "frequent";
+
 export function DashboardPage() {
   const me = useSession((s) => s.me);
   const { data, isLoading } = useDashboard();
   const { data: security } = useSecurity();
-  const openEditor = useUi((s) => s.openEditor);
-  const setCapture = useUi((s) => s.setCapture);
   const navigate = useNavigate();
   const [q, setQ] = useState("");
+  const [quick, setQuick] = useState<Quick>("favorites");
 
   const since = data?.sinceLastVisit;
   const score = security?.score;
@@ -115,39 +172,43 @@ export function DashboardPage() {
     score == null ? "default" : score >= 85 ? "good" : score >= 60 ? "warn" : "danger";
   const attention = ATTENTION.filter(([t]) => security?.counts[t]);
 
-  return (
-    <Page title="Home">
-      <PageBody
-        title={`${greeting()}${me ? `, ${firstName(me.user.name)}` : ""}`}
-        subtitle="Everything sensitive, in one place."
-        actions={
-          <>
-            <Button variant="outline" size="sm" onClick={() => setCapture(true)}>
-              <Sparkles /> Quick capture
-            </Button>
-            <Button size="sm" onClick={() => openEditor({})}>
-              <Plus /> New item
-            </Button>
-          </>
-        }
-      >
-        <form
-          onSubmit={(e) => {
-            e.preventDefault();
-            void navigate({ to: "/vault", search: { q: q || undefined } });
-          }}
-          className="relative"
-        >
-          <SearchIcon className="-translate-y-1/2 pointer-events-none absolute top-1/2 left-3.5 z-10 size-4 text-muted-foreground/70" />
-          <input
-            value={q}
-            onChange={(e) => setQ(e.target.value)}
-            placeholder="Search your vault…"
-            className="h-11 w-full rounded-xl border border-input bg-card ps-10 pe-3 text-sm shadow-xs/5 outline-none focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/24"
-          />
-        </form>
+  const quickItems =
+    quick === "favorites" ? data?.favorites : quick === "recent" ? data?.recent : data?.frequent;
+  const quickEmpty = {
+    favorites: "Star an item to keep it here.",
+    recent: "Items you open or copy show up here.",
+    frequent: "Nothing used yet.",
+  }[quick];
 
-        <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
+  return (
+    <Page title="Reports" className="lg:min-h-0">
+      <div className="mx-auto flex w-full max-w-7xl flex-col gap-4 p-4 md:p-6 lg:h-full lg:min-h-0">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div className="min-w-0">
+            <h1 className="font-semibold text-xl">Reports</h1>
+            <p className="text-muted-foreground text-sm">
+              {greeting()}
+              {me ? `, ${firstName(me.user.name)}` : ""}. Your vault at a glance.
+            </p>
+          </div>
+          <form
+            onSubmit={(e) => {
+              e.preventDefault();
+              void navigate({ to: "/vault", search: { q: q || undefined } });
+            }}
+            className="relative w-full sm:w-80"
+          >
+            <SearchIcon className="-translate-y-1/2 pointer-events-none absolute top-1/2 left-3 z-10 size-4 text-muted-foreground/70" />
+            <input
+              value={q}
+              onChange={(e) => setQ(e.target.value)}
+              placeholder="Search your vault…"
+              className="h-9 w-full rounded-lg border border-input bg-card ps-9 pe-3 text-sm shadow-xs/5 outline-none focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/24"
+            />
+          </form>
+        </div>
+
+        <div className="grid shrink-0 grid-cols-2 gap-3 md:grid-cols-4">
           {isLoading ? (
             ["a", "b", "c", "d"].map((k) => <Skeleton key={k} className="h-[5.5rem] rounded-xl" />)
           ) : (
@@ -171,7 +232,7 @@ export function DashboardPage() {
                 hint={
                   attention.length
                     ? attention
-                        .slice(0, 2)
+                        .slice(0, 3)
                         .map(([t, l]) => `${security!.counts[t]} ${l}`)
                         .join(" · ")
                     : "Nothing urgent"
@@ -202,74 +263,102 @@ export function DashboardPage() {
           )}
         </div>
 
-        {attention.length > 0 && (
-          <div className="flex flex-wrap items-center gap-2 rounded-xl border border-warning/30 bg-warning/5 px-4 py-3 text-sm">
-            <ShieldAlert className="size-4 text-warning-foreground" />
-            <span className="font-medium">Needs attention:</span>
-            {attention.map(([t, label]) => (
-              <span key={t} className="text-muted-foreground">
-                {security!.counts[t]} {label}
-              </span>
-            ))}
-            <Link
-              to="/security"
-              className="ml-auto flex items-center gap-0.5 text-muted-foreground text-xs hover:text-foreground"
-            >
-              Review <ChevronRight className="size-3.5" />
-            </Link>
-          </div>
-        )}
-
-        <div className="grid gap-4 lg:grid-cols-3">
-          <Section
-            title="Favorites"
+        <div className="grid gap-4 lg:min-h-0 lg:flex-1 lg:grid-cols-3">
+          <Card
+            title="Projects"
             action={
-              <Link
-                to="/vault"
-                search={{ favorite: true }}
-                className="text-muted-foreground text-xs hover:text-foreground"
-              >
+              <Link to="/projects" className={linkCls}>
                 All
               </Link>
             }
           >
-            {data?.favorites.length ? (
-              data.favorites.map((i) => <ItemLink key={i.id} item={i} />)
+            {data?.projects.length ? (
+              <div className="space-y-1.5 p-1">
+                {data.projects.map((p) => (
+                  <ProjectTile key={p.id} p={p} />
+                ))}
+              </div>
             ) : (
-              <EmptyNote>Star an item to keep it here.</EmptyNote>
+              <EmptyNote>Group accounts, keys and servers by what they belong to.</EmptyNote>
             )}
-          </Section>
-          <Section
-            title="Recently used"
+          </Card>
+
+          <Card
+            title={
+              <span className="flex items-center gap-0.5">
+                {(
+                  [
+                    ["favorites", "Favorites"],
+                    ["recent", "Recent"],
+                    ["frequent", "Most used"],
+                  ] as const
+                ).map(([k, label]) => (
+                  <button
+                    key={k}
+                    type="button"
+                    onClick={() => setQuick(k)}
+                    className={cn(
+                      "rounded-md px-2 py-1 text-[13px]",
+                      quick === k
+                        ? "bg-accent font-semibold text-foreground"
+                        : "font-normal text-muted-foreground hover:text-foreground",
+                    )}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </span>
+            }
             action={
               <Link
                 to="/vault"
-                search={{ sort: "recent" }}
-                className="text-muted-foreground text-xs hover:text-foreground"
+                search={quick === "favorites" ? { favorite: true } : { sort: quick }}
+                className={linkCls}
               >
                 All
               </Link>
             }
           >
-            {data?.recent.length ? (
-              data.recent.map((i) => (
-                <ItemLink key={i.id} item={i} right={timeAgo(i.lastAccessedAt)} />
+            {quickItems?.length ? (
+              quickItems.map((i) => (
+                <ItemLink
+                  key={i.id}
+                  item={i}
+                  right={
+                    quick === "recent"
+                      ? timeAgo(i.lastAccessedAt)
+                      : quick === "frequent"
+                        ? `${i.accessCount} uses`
+                        : undefined
+                  }
+                />
               ))
             ) : (
-              <EmptyNote>Items you open or copy show up here.</EmptyNote>
+              <EmptyNote>{quickEmpty}</EmptyNote>
             )}
-          </Section>
-          <Section
+            {quick === "frequent" && data && data.neverUsedCount > 0 && (
+              <Link
+                to="/cleanup"
+                className="mt-1 flex items-center gap-2 rounded-lg bg-muted/60 px-2.5 py-2 text-muted-foreground text-xs hover:text-foreground"
+              >
+                <Clock className="size-3.5" />
+                {data.neverUsedCount} item{data.neverUsedCount === 1 ? " hasn't" : "s haven't"} been
+                used in 180 days
+              </Link>
+            )}
+          </Card>
+
+          <Card
             title="Recent activity"
             action={
-              <Link to="/activity" className="text-muted-foreground text-xs hover:text-foreground">
+              <Link to="/activity" className={linkCls}>
                 All
               </Link>
             }
           >
             {data?.activity.length ? (
               data.activity.map((a) => (
-                <div key={a.id} className="flex items-center gap-2.5 px-1.5 py-1">
+                <div key={a.id} className="flex items-center gap-2.5 px-1.5 py-1.5">
                   <span className="flex size-7 shrink-0 items-center justify-center rounded-lg bg-muted text-muted-foreground">
                     <Activity className="size-3.5" />
                   </span>
@@ -278,7 +367,7 @@ export function DashboardPage() {
                       {ACTION_LABELS[a.action] ?? a.action}
                     </span>
                     <span className="block truncate text-muted-foreground text-xs">
-                      {[a.itemName, a.device].filter(Boolean).join(" · ") || " "}
+                      {[a.itemName, a.device].filter(Boolean).join(" · ") || " "}
                     </span>
                   </span>
                   <span className="shrink-0 text-muted-foreground text-xs">
@@ -289,69 +378,9 @@ export function DashboardPage() {
             ) : (
               <EmptyNote>No activity yet.</EmptyNote>
             )}
-          </Section>
+          </Card>
         </div>
-
-        <div className="grid gap-4 lg:grid-cols-3">
-          <Section
-            title="Projects"
-            className="lg:col-span-2"
-            action={
-              <Link to="/projects" className="text-muted-foreground text-xs hover:text-foreground">
-                All
-              </Link>
-            }
-          >
-            {data?.projects.length ? (
-              <div className="grid gap-2 sm:grid-cols-2">
-                {data.projects.map((p) => (
-                  <Link
-                    key={p.id}
-                    to="/projects/$projectId"
-                    params={{ projectId: p.id }}
-                    className="flex items-center gap-2.5 rounded-lg border border-border/70 px-3 py-2 hover:bg-accent/40"
-                  >
-                    <span
-                      className="flex size-7 items-center justify-center rounded-lg"
-                      style={{
-                        background: `${p.color ?? "#64748b"}22`,
-                        color: p.color ?? undefined,
-                      }}
-                    >
-                      <FolderKanban className="size-3.5" />
-                    </span>
-                    <span className="min-w-0 flex-1 truncate text-sm">{p.name}</span>
-                    <span className="text-muted-foreground text-xs tabular-nums">
-                      {p.itemCount}
-                    </span>
-                  </Link>
-                ))}
-              </div>
-            ) : (
-              <EmptyNote>Group accounts, keys and servers by what they belong to.</EmptyNote>
-            )}
-          </Section>
-          <Section title="Most used">
-            {data?.frequent.length ? (
-              data.frequent.map((i) => (
-                <ItemLink key={i.id} item={i} right={`${i.accessCount} uses`} />
-              ))
-            ) : (
-              <EmptyNote>Nothing yet.</EmptyNote>
-            )}
-            {data && data.neverUsedCount > 0 && (
-              <Link
-                to="/cleanup"
-                className="flex items-center gap-2 rounded-lg bg-muted/60 px-2.5 py-2 text-muted-foreground text-xs hover:text-foreground"
-              >
-                <Clock className="size-3.5" />
-                {data.neverUsedCount} item{data.neverUsedCount === 1 ? " hasn't" : "s haven't"} been
-                used in 180 days
-              </Link>
-            )}
-          </Section>
-        </div>
-      </PageBody>
+      </div>
     </Page>
   );
 }

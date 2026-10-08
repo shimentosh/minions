@@ -20,6 +20,8 @@ export interface EditorRequest {
   classificationId?: string;
   /** Create or edit a credential in this workspace instead of the personal vault. */
   workspaceId?: string;
+  /** Edit an item someone else shared with this user (edit access). */
+  shared?: boolean;
 }
 
 interface UiState {

@@ -506,3 +506,57 @@ describe("search, filters and matching", () => {
     expect(second.body.items.map((i: { name: string }) => i.name)).toEqual(["Note 2", "Note 3"]);
   });
 });
+
+describe("bulk organise", () => {
+  it("moves, tags and clears many items at once, and stays inside the vault", async () => {
+    const a = await buildItem(user, "LOGIN", "One", { username: "one" });
+    const b = await buildItem(user, "LOGIN", "Two", { username: "two" });
+    await user.agent.post("/vault/items").send(a).expect(201);
+    await user.agent.post("/vault/items").send(b).expect(201);
+    const project = (await user.agent.post("/projects").send({ name: "Acme" }).expect(201)).body;
+    const collection = (await user.agent.post("/collections").send({ name: "Servers" }).expect(201))
+      .body;
+
+    await user.agent
+      .patch("/vault/items/bulk")
+      .send({
+        ids: [a.id, b.id],
+        projectId: project.id,
+        collectionId: collection.id,
+        addTags: ["prod"],
+      })
+      .expect(200, { updated: 2 });
+    // Adding a tag twice is not an error.
+    await user.agent
+      .patch("/vault/items/bulk")
+      .send({ ids: [a.id], addTags: ["prod"] })
+      .expect(200);
+    const moved = await user.agent.get(`/vault/items?projectId=${project.id}`).expect(200);
+    expect(moved.body.items).toHaveLength(2);
+    const one = (await user.agent.get(`/vault/items/${a.id}`).expect(200)).body;
+    expect(one.collection?.id).toBe(collection.id);
+    expect(one.tags).toEqual(["prod"]);
+
+    await user.agent
+      .patch("/vault/items/bulk")
+      .send({ ids: [a.id, b.id], projectId: null, collectionId: null })
+      .expect(200);
+    const cleared = (await user.agent.get(`/vault/items/${b.id}`).expect(200)).body;
+    expect(cleared.project).toBeNull();
+    expect(cleared.collection).toBeNull();
+
+    const bob = await registerUser(app);
+    // Someone else's items, or a project from another vault, are refused.
+    await bob.agent
+      .patch("/vault/items/bulk")
+      .send({ ids: [a.id], favorite: true })
+      .expect(404);
+    const bobItem = await buildItem(bob, "LOGIN", "Bob's", { username: "bob" });
+    await bob.agent.post("/vault/items").send(bobItem).expect(201);
+    await bob.agent
+      .patch("/vault/items/bulk")
+      .send({ ids: [bobItem.id], projectId: project.id })
+      .expect(400);
+    await user.agent.patch("/vault/items/bulk").send({ ids: [] }).expect(400);
+  });
+});

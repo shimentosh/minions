@@ -137,6 +137,8 @@ export interface VaultItemSummary {
   createdAt: string;
   updatedAt: string;
   deletedAt: string | null;
+  /** Personal items: how many people it is shared with (pending invitations included). */
+  sharedWith?: number;
 }
 
 export interface ItemRelation {
@@ -166,6 +168,13 @@ export interface VaultItemDetail extends VaultItemSummary {
   relations: ItemRelation[];
   usedBy: NamedRef[];
   versionCount: number;
+  /**
+   * Personal items shared with people have their own key, wrapped by the vault
+   * key (AAD keyAad.itemKeyForVault). Null: the fields are under the vault key.
+   */
+  protectedItemKey?: string | null;
+  /** Someone who held this item's key lost access; its key should be replaced. */
+  rekeyNeeded?: boolean;
 }
 
 export interface UpsertItemRequest {
@@ -473,4 +482,116 @@ export interface OperatorUserRow {
   imports: number;
   workspaces: number;
   twoFactor: boolean;
+}
+
+// ─── Sharing items with people ───────────────────────────────────────────────
+//
+// A personal item shared by email. The owner's client gives the item its own
+// key and seals that key to each recipient's public key; someone without an
+// account (or a verified email, or sharing keys yet) waits as "invited" until
+// they can receive it, and the owner's client seals it the next time it is
+// open. See ARCHITECTURE.md §8.
+
+export type PeoplePermission = "VIEW" | "EDIT";
+
+/**
+ * invited: no verified account with sharing keys at this email yet.
+ * ready:   the recipient can receive it; the owner's app hands over the key next time it is open.
+ * active:  the recipient has the key.
+ * expired: past its end date; the recipient no longer gets it.
+ */
+export type PeopleShareStatus = "invited" | "ready" | "active" | "expired";
+
+export interface PersonRef {
+  id: string;
+  name: string;
+  email: string;
+}
+
+/** The owner's view of one person an item is shared with. */
+export interface PeopleShare {
+  id: string;
+  itemId: string;
+  itemName: string;
+  itemType: string;
+  email: string;
+  recipient: PersonRef | null;
+  permission: PeoplePermission;
+  status: PeopleShareStatus;
+  /** null: never expires. */
+  expiresAt: string | null;
+  createdAt: string;
+}
+
+/** Whether an email belongs to someone who can receive a share right now. */
+export interface ShareRecipientLookup {
+  email: string;
+  /** Present only when the account is verified and has sharing keys. */
+  recipient: (PersonRef & { publicKey: string }) | null;
+}
+
+export interface CreatePeopleShareRequest {
+  email: string;
+  permission: PeoplePermission;
+  /** 0 = never. */
+  expiresInMinutes: number;
+  /** With a recipient from the lookup: their id and the item key sealed to them. */
+  recipientUserId?: string;
+  sealedItemKey?: string;
+}
+
+/** Re-encrypted sensitive values, the way vault-key rotation sends them. */
+export interface ReencryptedFields {
+  fields: { key: string; value: string }[];
+  versions: { id: string; fields: { key: string; value: string }[] }[];
+}
+
+/**
+ * Moves a personal item onto its own key (first share) or a new key (after
+ * someone lost access): every secret and version re-encrypted, the key
+ * wrapped by the vault key, and re-sealed to everyone who keeps access.
+ */
+export interface SetItemKeyRequest extends ReencryptedFields {
+  protectedItemKey: string;
+  revision: number;
+  seals: { shareId: string; sealedItemKey: string }[];
+}
+
+/** GET /vault/items/:id/item-key: what a re-key must re-encrypt, and who must get the new key. */
+export interface ItemKeyMaterial extends ReencryptedFields {
+  revision: number;
+  protectedItemKey: string | null;
+  holders: { shareId: string; email: string; userId: string; publicKey: string }[];
+}
+
+/** A share the owner's client can complete now: seal the item key to this person. */
+export interface PendingSeal {
+  shareId: string;
+  itemId: string;
+  itemName: string;
+  protectedItemKey: string;
+  recipient: PersonRef & { publicKey: string };
+}
+
+/** The recipient's view: an item someone shared with them. */
+export interface SharedWithMeItem extends VaultItemSummary {
+  shareId: string;
+  permission: PeoplePermission;
+  sharedBy: PersonRef;
+  sharedAt: string;
+  expiresAt: string | null;
+  /** waiting: the owner's app has not handed over the key yet. */
+  status: "active" | "waiting";
+  /** Not opened yet. */
+  isNew: boolean;
+}
+
+export interface SharedItemDetail extends VaultItemDetail {
+  shareId: string;
+  permission: PeoplePermission;
+  sharedBy: PersonRef;
+  sharedAt: string;
+  expiresAt: string | null;
+  /** The item key sealed to the caller (sealContext.itemKey). */
+  sealedItemKey: string;
 }

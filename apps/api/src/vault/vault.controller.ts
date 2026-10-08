@@ -157,6 +157,8 @@ export class VaultService {
         metadata: i.metadata,
         tags: i.tags.map((t) => t.tag.name),
         usedByProjectIds: i.usedBy.map((u) => u.projectId),
+        // Items shared with people: their own key, wrapped by the vault key. Fields are under it.
+        protectedItemKey: i.protectedItemKey,
         fields: i.fields.map(({ key, label, kind, sensitive, value }) => ({
           key,
           label,

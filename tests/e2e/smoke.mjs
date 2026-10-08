@@ -47,7 +47,7 @@ try {
   await page.getByLabel("Confirm master password").fill(password);
   await shot("01-register");
   await page.getByRole("button", { name: "Create vault" }).click();
-  await page.getByText("Everything sensitive, in one place.").waitFor({ timeout: 30_000 });
+  await page.getByRole("navigation", { name: "Vault" }).waitFor({ timeout: 30_000 });
   await shot("02-dashboard-empty");
 
   step("create project");
@@ -120,7 +120,7 @@ try {
   await page.keyboard.press("Escape");
 
   for (const [path, name] of [
-    ["/", "10-dashboard"],
+    ["/reports", "10-reports"],
     ["/activity", "11-activity"],
     ["/devices", "12-devices"],
     ["/generator", "13-generator"],
@@ -141,7 +141,7 @@ try {
   await page.getByLabel("Master password").fill(password);
   await page.getByRole("button", { name: "Unlock" }).click();
   // Back where the user was, with the vault open again.
-  await page.getByText("Devices & sessions").first().waitFor({ timeout: 30_000 });
+  await page.getByRole("link", { name: "Sign-in & keys" }).waitFor({ timeout: 30_000 });
 
   step("dark mode");
   await page.evaluate(() => document.documentElement.classList.add("dark"));

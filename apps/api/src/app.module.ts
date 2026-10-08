@@ -14,9 +14,11 @@ import { SessionGuard } from "./common/guards";
 import { PrismaModule } from "./common/prisma.service";
 import { HealthController } from "./health.controller";
 import { ImportsModule } from "./imports/imports.module";
+import { MailModule } from "./mail/mail.module";
 import { NotesModule } from "./notes/notes.module";
 import { OperatorModule } from "./operator/operator.module";
 import { OrganizeModule } from "./organize/organize.module";
+import { PeopleSharingModule } from "./people-sharing/people-sharing.module";
 import { SecurityModule } from "./security/security.module";
 import { SharesModule } from "./shares/shares.module";
 import { RotationController, RotationService } from "./vault/rotation";
@@ -51,6 +53,7 @@ function throttlerStorage() {
       }),
     }),
     PrismaModule,
+    MailModule,
     EmailVerificationModule,
     CoreServicesModule,
     AccountModule,
@@ -61,6 +64,7 @@ function throttlerStorage() {
     ImportsModule,
     SharesModule,
     WorkspacesModule,
+    PeopleSharingModule,
     OperatorModule,
   ],
   controllers: [

@@ -25,7 +25,7 @@ async function account(label) {
   await page.getByLabel("Master password", { exact: true }).fill(pw);
   await page.getByLabel("Confirm master password").fill(pw);
   await page.getByRole("button", { name: "Create vault" }).click();
-  await page.getByText("Everything sensitive, in one place.").waitFor({ timeout: 30_000 });
+  await page.getByRole("navigation", { name: "Vault" }).waitFor({ timeout: 30_000 });
   const nav = async (path) => {
     await page.evaluate((to) => {
       window.history.pushState({}, "", to);
