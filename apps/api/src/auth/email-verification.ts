@@ -113,7 +113,7 @@ export class EmailVerificationController {
 
 @Module({
   controllers: [EmailVerificationController],
-  providers: [EmailVerificationService, Mailer],
+  providers: [EmailVerificationService],
   exports: [EmailVerificationService],
 })
 export class EmailVerificationModule {}

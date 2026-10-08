@@ -13,6 +13,7 @@ import {
   startRegistration,
 } from "@simplewebauthn/browser";
 import { useMutation, useQuery } from "@tanstack/react-query";
+import { useSearch } from "@tanstack/react-router";
 import {
   Download,
   Fingerprint,
@@ -648,7 +649,14 @@ function VaultKeySection() {
   );
 }
 
+const TAB_TITLES = {
+  account: "Account",
+  security: "Sign-in & keys",
+  data: "Backup & recovery",
+} as const;
+
 export function SettingsPage() {
+  const { tab = "account" } = useSearch({ strict: false }) as { tab?: "security" | "data" };
   const me = useSession((s) => s.me);
   const setSettings = useSession((s) => s.setSettings);
   const emergencyLock = useSession((s) => s.emergencyLock);
@@ -692,125 +700,137 @@ export function SettingsPage() {
 
   if (!me) return null;
   return (
-    <Page title="Settings">
-      <PageBody title="Settings" className="max-w-3xl">
-        <Section title="Account">
-          <Row label="Name">
-            <div className="flex gap-1.5">
-              <Input value={name} onChange={(e) => setName(e.target.value)} className="w-56" />
+    <Page title={TAB_TITLES[tab]} crumbs={[{ label: "Settings", to: "/settings" }]}>
+      <PageBody title={TAB_TITLES[tab]} className="max-w-3xl">
+        {tab === "account" && (
+          <>
+            <Section title="Account">
+              <Row label="Name">
+                <div className="flex gap-1.5">
+                  <Input value={name} onChange={(e) => setName(e.target.value)} className="w-56" />
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    disabled={!name.trim() || name === me.user.name}
+                    onClick={() => save.mutate({ name })}
+                  >
+                    Save
+                  </Button>
+                </div>
+              </Row>
+              <Row label="Email" hint="Used to sign in">
+                <span className="text-sm">{me.user.email}</span>
+              </Row>
+            </Section>
+
+            <Section title="Vault">
+              <Row
+                label="Auto-lock"
+                hint="Lock the vault after this much inactivity. The extension and desktop app lock on their own too."
+              >
+                <SimpleSelect
+                  className="w-44"
+                  value={String(me.user.autoLockMinutes)}
+                  onChange={(v) => save.mutate({ autoLockMinutes: Number(v) })}
+                  options={[
+                    { value: "0", label: "Immediately" },
+                    { value: "1", label: "1 minute" },
+                    { value: "5", label: "5 minutes" },
+                    { value: "15", label: "15 minutes" },
+                    { value: "30", label: "30 minutes" },
+                    { value: "60", label: "1 hour" },
+                    { value: "240", label: "4 hours" },
+                  ]}
+                />
+              </Row>
+              <Row label="Clear clipboard" hint="After copying a password or secret">
+                <SimpleSelect
+                  className="w-44"
+                  value={String(me.user.clipboardClearSeconds)}
+                  onChange={(v) => save.mutate({ clipboardClearSeconds: Number(v) })}
+                  options={[
+                    { value: "15", label: "After 15 seconds" },
+                    { value: "30", label: "After 30 seconds" },
+                    { value: "60", label: "After 60 seconds" },
+                  ]}
+                />
+              </Row>
+              <Row
+                label="AI organisation"
+                hint={
+                  ai.data?.available
+                    ? "DeepSeek suggests projects, collections and tags from names and websites only. Secrets and financial items are never sent."
+                    : "Not configured on this server. Rules and your own habits are used instead."
+                }
+              >
+                <Switch
+                  checked={me.user.aiEnabled}
+                  onCheckedChange={(v) => save.mutate({ aiEnabled: v })}
+                />
+              </Row>
+              <Row label="Theme">
+                <SimpleSelect
+                  className="w-44"
+                  value={theme}
+                  onChange={(v) => setTheme(v as Theme)}
+                  options={[
+                    { value: "system", label: "System" },
+                    { value: "light", label: "Light" },
+                    { value: "dark", label: "Dark" },
+                  ]}
+                />
+              </Row>
+            </Section>
+          </>
+        )}
+
+        {tab === "security" && (
+          <>
+            <TwoFactorSection />
+            <PasskeysSection />
+            <MasterPasswordSection />
+            <VaultKeySection />
+          </>
+        )}
+
+        {tab === "data" && (
+          <>
+            <Section
+              title="Backup"
+              hint="Everything stays encrypted: values, history and notes. Restoring needs your master password."
+            >
               <Button
                 size="sm"
                 variant="outline"
-                disabled={!name.trim() || name === me.user.name}
-                onClick={() => save.mutate({ name })}
+                className="self-start"
+                onClick={() => backup.mutate()}
+                loading={backup.isPending}
               >
-                Save
+                <Download /> Download encrypted backup
               </Button>
-            </div>
-          </Row>
-          <Row label="Email" hint="Used to sign in">
-            <span className="text-sm">{me.user.email}</span>
-          </Row>
-        </Section>
+              <RestoreBackup />
+            </Section>
 
-        <Section title="Vault">
-          <Row
-            label="Auto-lock"
-            hint="Lock the vault after this much inactivity. The extension and desktop app lock on their own too."
-          >
-            <SimpleSelect
-              className="w-44"
-              value={String(me.user.autoLockMinutes)}
-              onChange={(v) => save.mutate({ autoLockMinutes: Number(v) })}
-              options={[
-                { value: "0", label: "Immediately" },
-                { value: "1", label: "1 minute" },
-                { value: "5", label: "5 minutes" },
-                { value: "15", label: "15 minutes" },
-                { value: "30", label: "30 minutes" },
-                { value: "60", label: "1 hour" },
-                { value: "240", label: "4 hours" },
-              ]}
-            />
-          </Row>
-          <Row label="Clear clipboard" hint="After copying a password or secret">
-            <SimpleSelect
-              className="w-44"
-              value={String(me.user.clipboardClearSeconds)}
-              onChange={(v) => save.mutate({ clipboardClearSeconds: Number(v) })}
-              options={[
-                { value: "15", label: "After 15 seconds" },
-                { value: "30", label: "After 30 seconds" },
-                { value: "60", label: "After 60 seconds" },
-              ]}
-            />
-          </Row>
-          <Row
-            label="AI organisation"
-            hint={
-              ai.data?.available
-                ? "DeepSeek suggests projects, collections and tags from names and websites only. Secrets and financial items are never sent."
-                : "Not configured on this server. Rules and your own habits are used instead."
-            }
-          >
-            <Switch
-              checked={me.user.aiEnabled}
-              onCheckedChange={(v) => save.mutate({ aiEnabled: v })}
-            />
-          </Row>
-          <Row label="Theme">
-            <SimpleSelect
-              className="w-44"
-              value={theme}
-              onChange={(v) => setTheme(v as Theme)}
-              options={[
-                { value: "system", label: "System" },
-                { value: "light", label: "Light" },
-                { value: "dark", label: "Dark" },
-              ]}
-            />
-          </Row>
-        </Section>
-
-        <TwoFactorSection />
-        <PasskeysSection />
-        <MasterPasswordSection />
-        <VaultKeySection />
-
-        <Section
-          title="Backup"
-          hint="Everything stays encrypted: values, history and notes. Restoring needs your master password."
-        >
-          <Button
-            size="sm"
-            variant="outline"
-            className="self-start"
-            onClick={() => backup.mutate()}
-            loading={backup.isPending}
-          >
-            <Download /> Download encrypted backup
-          </Button>
-          <RestoreBackup />
-        </Section>
-
-        <Section title="Emergency" hint="Lost a device? Sign out everywhere at once.">
-          <Button
-            size="sm"
-            variant="destructive"
-            className="self-start"
-            onClick={async () => {
-              if (window.confirm("Sign out every device, including this one?")) {
-                try {
-                  await emergencyLock();
-                } catch (e) {
-                  toast.error(errorMessage(e));
-                }
-              }
-            }}
-          >
-            <ShieldAlert /> Lock all devices
-          </Button>
-        </Section>
+            <Section title="Emergency" hint="Lost a device? Sign out everywhere at once.">
+              <Button
+                size="sm"
+                variant="destructive"
+                className="self-start"
+                onClick={async () => {
+                  if (window.confirm("Sign out every device, including this one?")) {
+                    try {
+                      await emergencyLock();
+                    } catch (e) {
+                      toast.error(errorMessage(e));
+                    }
+                  }
+                }}
+              >
+                <ShieldAlert /> Lock all devices
+              </Button>
+            </Section>
+          </>
+        )}
       </PageBody>
     </Page>
   );

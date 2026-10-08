@@ -29,7 +29,7 @@ export function VerifyEmailBanner() {
       <MailWarning className="size-4 shrink-0" />
       <span className="min-w-0 flex-1">
         Confirm your email address. We sent a link to <strong>{me.user.email}</strong>. Until then
-        you can't join workspaces.
+        you can't join workspaces or share with people.
       </span>
       <Button size="xs" variant="outline" loading={busy} onClick={() => void resend()}>
         Resend link

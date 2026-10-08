@@ -55,7 +55,7 @@ try {
   await page.getByLabel("Master password", { exact: true }).fill(password);
   await page.getByLabel("Confirm master password").fill(password);
   await page.getByRole("button", { name: "Create vault" }).click();
-  await page.getByText("Everything sensitive, in one place.").waitFor({ timeout: 30_000 });
+  await page.getByRole("navigation", { name: "Vault" }).waitFor({ timeout: 30_000 });
 
   // ── Paste anything picks the type and fills the fields ────────────────────
   await page.getByRole("button", { name: "New item" }).first().click();

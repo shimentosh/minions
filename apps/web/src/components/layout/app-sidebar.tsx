@@ -1,38 +1,21 @@
+import { useDndMonitor } from "@dnd-kit/core";
 import { Link, useRouterState } from "@tanstack/react-router";
 import {
-  Activity,
   ChevronRight,
-  Cloud,
-  CreditCard,
   FolderKanban,
-  Globe,
-  KeyRound,
   Layers,
-  LayoutDashboard,
-  Link2,
   Lock,
   type LucideIcon,
-  MonitorSmartphone,
-  NotebookText,
   Plus,
   SearchIcon,
-  ShieldCheck,
-  Sparkles,
-  Star,
-  Timer,
-  Trash2,
-  Upload,
   Users,
-  Vault,
-  WandSparkles,
-  Wrench,
+  X,
 } from "lucide-react";
-import type { ReactNode } from "react";
+import { type ReactNode, useState } from "react";
 import { Collapsible, CollapsiblePanel, CollapsibleTrigger } from "@/components/ui/collapsible";
 import {
   Sidebar,
   SidebarContent,
-  SidebarFooter,
   SidebarGroup,
   SidebarGroupContent,
   SidebarGroupLabel,
@@ -42,12 +25,14 @@ import {
   SidebarMenuItem,
   useSidebar,
 } from "@/components/ui/sidebar";
+import { type MoveTarget, useDropTarget } from "@/components/vault/organize";
 import { cn } from "@/lib/cn";
 import { useCollections, useProjects, useSecurity } from "@/lib/queries";
 import { useSession } from "@/lib/session";
 import { useUi } from "@/lib/ui-store";
 import { useInvitations, useWorkspaces } from "@/lib/workspace-queries";
-import { useOperatorStatus } from "@/routes/operator-page";
+import { useSharedWithMe } from "@/routes/shared-page";
+import { HUBS, hubFor } from "./hubs";
 import { NewGroupDialog } from "./new-group-dialog";
 
 interface NavItem {
@@ -56,9 +41,15 @@ interface NavItem {
   to: string;
   search?: Record<string, string | boolean | undefined>;
   badge?: number | null;
+  color?: string | null;
   /** Active when the current location matches. */
   match: (path: string, search: Record<string, unknown>) => boolean;
 }
+
+const MAX_ROWS = 6;
+const NAV_BUTTON =
+  "gap-2.5 ps-3 text-sm hover:bg-transparent hover:text-sidebar-accent-foreground active:bg-transparent [&>svg]:size-4 [&>svg]:shrink-0 [&>svg]:text-sidebar-foreground/60 data-[active=true]:[&>svg]:text-sidebar-accent-foreground";
+const GROUP_LABEL = "h-7 cursor-pointer justify-between px-0 text-sidebar-accent-foreground";
 
 // The reference's NavGroup: a collapsible label, 32px rows, muted icons that
 // brighten when active.
@@ -81,9 +72,7 @@ function NavGroup({
         <div className="flex items-center">
           <CollapsibleTrigger
             className="flex-1 data-panel-open:[&_svg]:rotate-90"
-            render={
-              <SidebarGroupLabel className="h-7 cursor-pointer justify-between px-0 text-sidebar-accent-foreground" />
-            }
+            render={<SidebarGroupLabel className={GROUP_LABEL} />}
           >
             <span>{label}</span>
             <ChevronRight className="h-3.5 w-3.5 text-sidebar-foreground/60 transition-transform duration-200" />
@@ -98,10 +87,7 @@ function NavGroup({
                   <SidebarMenuButton
                     tooltip={item.title}
                     isActive={item.match(location.pathname, search)}
-                    className={cn(
-                      "gap-2.5 ps-3 text-sm hover:bg-transparent hover:text-sidebar-accent-foreground active:bg-transparent [&>svg]:size-4 [&>svg]:shrink-0 [&>svg]:text-sidebar-foreground/60 data-[active=true]:[&>svg]:text-sidebar-accent-foreground",
-                      isMobile ? "h-11" : "h-8",
-                    )}
+                    className={cn(NAV_BUTTON, isMobile ? "h-11" : "h-8")}
                     render={<Link to={item.to} search={item.search as never} />}
                   >
                     <item.icon aria-hidden />
@@ -121,13 +107,6 @@ function NavGroup({
     </Collapsible>
   );
 }
-
-const vaultMatch =
-  (key: string, value?: string | boolean) => (path: string, s: Record<string, unknown>) =>
-    path === "/vault" &&
-    (value === undefined
-      ? !s.category && !s.favorite && !s.trash && !s.projectId && !s.collectionId && !s.tag
-      : s[key] === value);
 
 function VaultHeader() {
   const me = useSession((s) => s.me);
@@ -184,94 +163,218 @@ function SearchButton() {
   );
 }
 
+/** A sidebar project or collection: a link, and a place to drop dragged items. */
+function DropNavItem({ item, target }: { item: NavItem; target: MoveTarget }) {
+  const { isMobile } = useSidebar();
+  const location = useRouterState({ select: (s) => s.location });
+  const drop = useDropTarget(target);
+  return (
+    <SidebarMenuItem ref={drop.setNodeRef}>
+      <SidebarMenuButton
+        tooltip={item.title}
+        isActive={item.match(location.pathname, location.search as Record<string, unknown>)}
+        className={cn(
+          NAV_BUTTON,
+          isMobile ? "h-11" : "h-8",
+          drop.dragging && "ring-1 ring-sidebar-border ring-inset",
+          drop.isOver && "bg-primary/10 text-sidebar-accent-foreground ring-primary/50",
+        )}
+        render={<Link to={item.to} search={item.search as never} />}
+      >
+        {item.color ? (
+          <span className="flex size-4 items-center justify-center">
+            <span className="size-2 rounded-full" style={{ background: item.color }} />
+          </span>
+        ) : (
+          <item.icon aria-hidden />
+        )}
+        <span className="truncate">{item.title}</span>
+        {item.badge ? <Badge>{item.badge}</Badge> : null}
+      </SidebarMenuButton>
+    </SidebarMenuItem>
+  );
+}
+
+/** Shown only mid-drag: drop here to take items out of their project or collection. */
+function RemoveTarget({ kind }: { kind: "project" | "collection" }) {
+  const drop = useDropTarget({ kind, id: null, name: `its ${kind}` });
+  return (
+    <SidebarMenuItem ref={drop.setNodeRef} className={cn(!drop.dragging && "hidden")}>
+      <div
+        className={cn(
+          "flex h-8 items-center gap-2 rounded-md border border-sidebar-border border-dashed ps-3 text-sidebar-foreground/70 text-xs",
+          drop.isOver && "border-primary/60 bg-primary/10 text-sidebar-accent-foreground",
+        )}
+      >
+        <X className="size-3.5" /> No {kind}
+      </div>
+    </SidebarMenuItem>
+  );
+}
+
+function Badge({ children }: { children: ReactNode }) {
+  return (
+    <span className="ml-auto flex h-5 min-w-5 items-center justify-center rounded-sm border border-sidebar-border/60 px-1 font-medium text-[11px] text-sidebar-foreground/80">
+      {children}
+    </span>
+  );
+}
+
+/** Whether a sidebar group is expanded. Closed unless the person opened it; remembered. */
+function useGroupOpen(kind: string) {
+  const key = `minions-sidebar-${kind}`;
+  const [open, setOpen] = useState(() => {
+    try {
+      return localStorage.getItem(key) === "open";
+    } catch {
+      return false;
+    }
+  });
+  const set = (v: boolean) => {
+    setOpen(v);
+    try {
+      localStorage.setItem(key, v ? "open" : "closed");
+    } catch {
+      // Private mode: lasts for this visit only.
+    }
+  };
+  return [open, set] as const;
+}
+
+/** A collapsible list of projects or collections that accept drops, trimmed to a few rows. */
+function DropGroup({
+  label,
+  kind,
+  items,
+  more,
+  action,
+  empty,
+}: {
+  label: string;
+  kind: "project" | "collection";
+  items: (NavItem & { id: string })[];
+  more?: NavItem;
+  action: ReactNode;
+  empty: string;
+}) {
+  const [all, setAll] = useState(false);
+  const [open, setOpen] = useGroupOpen(kind);
+  // Opens while an item is being dragged, so its projects or collections can take the drop.
+  const [dragging, setDragging] = useState(false);
+  useDndMonitor({
+    onDragStart: () => setDragging(true),
+    onDragEnd: () => setDragging(false),
+    onDragCancel: () => setDragging(false),
+  });
+  const shown = all ? items : items.slice(0, MAX_ROWS);
+  return (
+    <Collapsible open={open || dragging} onOpenChange={setOpen} className="group/collapsible">
+      <SidebarGroup className="gap-1 p-2">
+        <div className="flex items-center">
+          <CollapsibleTrigger
+            className="flex-1 data-panel-open:[&_svg]:rotate-90"
+            render={<SidebarGroupLabel className={GROUP_LABEL} />}
+          >
+            <span>{label}</span>
+            <ChevronRight className="h-3.5 w-3.5 text-sidebar-foreground/60 transition-transform duration-200" />
+          </CollapsibleTrigger>
+          {action}
+        </div>
+        <CollapsiblePanel>
+          <SidebarGroupContent>
+            <SidebarMenu className="gap-0.5">
+              {shown.map((item) => (
+                <DropNavItem
+                  key={item.id}
+                  item={item}
+                  target={{ kind, id: item.id, name: item.title }}
+                />
+              ))}
+              {!items.length && (
+                <li className="px-3 py-1 text-sidebar-foreground/60 text-xs">{empty}</li>
+              )}
+              {items.length > MAX_ROWS && (
+                <SidebarMenuItem>
+                  <button
+                    type="button"
+                    onClick={() => setAll(!all)}
+                    className="h-7 w-full rounded-md ps-3 text-left text-sidebar-foreground/70 text-xs hover:text-sidebar-accent-foreground"
+                  >
+                    {all ? "Show less" : `Show all ${items.length}`}
+                  </button>
+                </SidebarMenuItem>
+              )}
+              {more && <PlainNavItem item={more} />}
+              <RemoveTarget kind={kind} />
+            </SidebarMenu>
+          </SidebarGroupContent>
+        </CollapsiblePanel>
+      </SidebarGroup>
+    </Collapsible>
+  );
+}
+
+function PlainNavItem({ item }: { item: NavItem }) {
+  const { isMobile } = useSidebar();
+  const location = useRouterState({ select: (s) => s.location });
+  return (
+    <SidebarMenuItem>
+      <SidebarMenuButton
+        tooltip={item.title}
+        isActive={item.match(location.pathname, location.search as Record<string, unknown>)}
+        className={cn(NAV_BUTTON, isMobile ? "h-11" : "h-8")}
+        render={<Link to={item.to} search={item.search as never} />}
+      >
+        <item.icon aria-hidden />
+        <span className="truncate">{item.title}</span>
+        {item.badge ? <Badge>{item.badge}</Badge> : null}
+      </SidebarMenuButton>
+    </SidebarMenuItem>
+  );
+}
+
 export function AppSidebar() {
   const { data: projects } = useProjects();
   const { data: collections } = useCollections();
   const { data: security } = useSecurity();
-  const setCapture = useUi((s) => s.setCapture);
   const { data: workspaces } = useWorkspaces();
   const { data: invitations } = useInvitations();
-  const { data: operator } = useOperatorStatus();
+  const { data: sharedWithMe } = useSharedWithMe();
+  const newShared = sharedWithMe?.filter((i) => i.isNew && i.status === "active").length ?? null;
+  const location = useRouterState({ select: (s) => s.location });
+  const activeHub = hubFor(location.pathname, location.search as Record<string, unknown>);
   const openIssues =
     security?.findings.filter((f) => !f.dismissed && f.severity !== "low").length ?? null;
 
-  const vault: NavItem[] = [
-    { title: "Home", icon: LayoutDashboard, to: "/", match: (p) => p === "/" },
-    { title: "All items", icon: Vault, to: "/vault", search: {}, match: vaultMatch("") },
-    {
-      title: "Favorites",
-      icon: Star,
-      to: "/vault",
-      search: { favorite: true },
-      match: vaultMatch("favorite", true),
-    },
-    {
-      title: "Logins",
-      icon: Globe,
-      to: "/vault",
-      search: { category: "login" },
-      match: vaultMatch("category", "login"),
-    },
-    {
-      title: "Secrets & keys",
-      icon: KeyRound,
-      to: "/vault",
-      search: { category: "secret" },
-      match: vaultMatch("category", "secret"),
-    },
-    {
-      title: "Infrastructure",
-      icon: Cloud,
-      to: "/vault",
-      search: { category: "infrastructure" },
-      match: vaultMatch("category", "infrastructure"),
-    },
-    {
-      title: "Financial",
-      icon: CreditCard,
-      to: "/vault",
-      search: { category: "financial" },
-      match: vaultMatch("category", "financial"),
-    },
-    {
-      title: "Authenticator",
-      icon: Timer,
-      to: "/authenticator",
-      match: (p) => p === "/authenticator",
-    },
-    { title: "Notes", icon: NotebookText, to: "/notes", match: (p) => p.startsWith("/notes") },
-    {
-      title: "Trash",
-      icon: Trash2,
-      to: "/vault",
-      search: { trash: true },
-      match: vaultMatch("trash", true),
-    },
-  ];
+  const hubs: NavItem[] = HUBS.map((h) => ({
+    title: h.title,
+    icon: h.icon,
+    to: h.to,
+    badge: h.id === "security" ? openIssues : h.id === "shared" ? newShared : null,
+    match: () => activeHub?.id === h.id,
+  }));
 
-  const projectItems: NavItem[] = (projects ?? [])
+  const projectItems = (projects ?? [])
     .filter((p) => !p.archived)
     .map((p) => ({
+      id: p.id,
       title: p.name,
       icon: FolderKanban,
+      color: p.color,
       to: `/projects/${p.id}`,
       badge: p.itemCount || null,
-      match: (path) => path === `/projects/${p.id}`,
+      match: (path: string) => path === `/projects/${p.id}`,
     }));
-  projectItems.push({
-    title: "All projects",
-    icon: Layers,
-    to: "/projects",
-    match: (p) => p === "/projects",
-  });
 
-  const collectionItems: NavItem[] = (collections ?? []).map((c) => ({
+  const collectionItems = (collections ?? []).map((c) => ({
+    id: c.id,
     title: c.name,
     icon: Layers,
+    color: c.color,
     to: "/vault",
     search: { collectionId: c.id },
     badge: c.itemCount || null,
-    match: (p, s) => p === "/vault" && s.collectionId === c.id,
+    match: (p: string, s: Record<string, unknown>) => p === "/vault" && s.collectionId === c.id,
   }));
 
   const workspaceItems: NavItem[] = (workspaces ?? []).map((w) => ({
@@ -287,43 +390,6 @@ export function AppSidebar() {
     badge: invitations?.length || null,
     match: (p) => p === "/workspaces",
   });
-
-  const securityItems: NavItem[] = [
-    {
-      title: "Security Center",
-      icon: ShieldCheck,
-      to: "/security",
-      badge: openIssues,
-      match: (p) => p === "/security",
-    },
-    { title: "Shared links", icon: Link2, to: "/shares", match: (p) => p === "/shares" },
-    { title: "Activity", icon: Activity, to: "/activity", match: (p) => p === "/activity" },
-    {
-      title: "Devices & sessions",
-      icon: MonitorSmartphone,
-      to: "/devices",
-      match: (p) => p === "/devices",
-    },
-  ];
-
-  const tools: NavItem[] = [
-    {
-      title: "Password generator",
-      icon: WandSparkles,
-      to: "/generator",
-      match: (p) => p === "/generator",
-    },
-    { title: "Import", icon: Upload, to: "/import", match: (p) => p === "/import" },
-    { title: "Cleanup", icon: Wrench, to: "/cleanup", match: (p) => p === "/cleanup" },
-  ];
-  // Shown only to accounts on the server's OPERATOR_USER_IDS allowlist.
-  if (operator?.operator)
-    tools.push({
-      title: "Operator",
-      icon: Activity,
-      to: "/operator",
-      match: (p) => p === "/operator",
-    });
 
   const addButton = (kind: "project" | "collection") => (
     <NewGroupDialog
@@ -348,23 +414,36 @@ export function AppSidebar() {
       </SidebarHeader>
       <SidebarContent className="gap-1 py-1">
         <SearchButton />
-        <NavGroup label="Vault" items={vault} />
+        <SidebarGroup className="p-2 pt-0">
+          <SidebarMenu className="gap-0.5">
+            {hubs.map((item) => (
+              <PlainNavItem key={item.title} item={item} />
+            ))}
+          </SidebarMenu>
+        </SidebarGroup>
+        <div className="mx-4 my-1 h-px bg-sidebar-border/70" />
+        <DropGroup
+          label="Projects"
+          kind="project"
+          items={projectItems}
+          more={{
+            title: "All projects",
+            icon: Layers,
+            to: "/projects",
+            match: (p) => p === "/projects",
+          }}
+          action={addButton("project")}
+          empty="Group credentials by product or client."
+        />
+        <DropGroup
+          label="Collections"
+          kind="collection"
+          items={collectionItems}
+          action={addButton("collection")}
+          empty="Folders for anything else."
+        />
         <NavGroup label="Workspaces" items={workspaceItems} />
-        <NavGroup label="Projects" items={projectItems} action={addButton("project")} />
-        <NavGroup label="Collections" items={collectionItems} action={addButton("collection")} />
-        <NavGroup label="Security" items={securityItems} />
-        <NavGroup label="Tools" items={tools} />
       </SidebarContent>
-      <SidebarFooter>
-        <button
-          type="button"
-          onClick={() => setCapture(true)}
-          className="flex h-9 w-full items-center gap-2 rounded-lg border border-sidebar-border bg-background/60 px-3 text-sm text-sidebar-accent-foreground shadow-xs hover:bg-background"
-        >
-          <Sparkles className="size-4 text-sidebar-foreground/70" />
-          Quick capture
-        </button>
-      </SidebarFooter>
     </Sidebar>
   );
 }

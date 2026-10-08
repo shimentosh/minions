@@ -113,8 +113,8 @@ limit. They are listed so nobody mistakes them for solved.
   also R11). Rotation protects future values only: a removed member may have
   copied what they saw. This design needs its own review before release.
 - **R7. Notifications are in-app only.** New-device, lockout and 2FA changes are
-  security events in the app; there is no email or push notification yet
-  (there is no mail infrastructure).
+  security events in the app; there is no email or push notification for them
+  yet. (Mail is used only for email verification and share invitations.)
 - **R8. Rate limits are per process** unless `REDIS_URL` is set. Production
   with more than one instance must set it.
 - **R9. Extension clipboard clearing is unconditional.** After 30 s the

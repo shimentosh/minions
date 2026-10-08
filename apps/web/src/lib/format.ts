@@ -29,6 +29,10 @@ export function firstName(name: string | null | undefined) {
 
 export const ACTION_LABELS: Record<string, string> = {
   "item.viewed": "Viewed",
+  "share.created": "Created a share link",
+  "share.revoked": "Revoked a share link",
+  "share.viewed": "Share link opened",
+  "operator.viewed": "Opened the operator dashboard",
   "item.revealed": "Revealed a field",
   "item.created": "Created",
   "item.updated": "Updated",

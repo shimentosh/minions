@@ -234,7 +234,9 @@ export function SharesPage() {
           {s.maxViews !== null ? ` of ${s.maxViews}` : ""} time{s.viewCount === 1 ? "" : "s"}
           {s.lastViewedAt ? ` · last ${timeAgo(s.lastViewedAt)}` : ""} ·{" "}
           {s.status === "active"
-            ? `expires ${new Date(s.expiresAt).toLocaleString()}`
+            ? s.expiresAt
+              ? `expires ${new Date(s.expiresAt).toLocaleString()}`
+              : "never expires"
             : `created ${timeAgo(s.createdAt)}`}
         </div>
       </div>

@@ -125,8 +125,19 @@ password. Passkey-only unlock would need the PRF extension and is not built.
 Known limits: the server could hand out a substituted public key; the confirm dialog's
 fingerprint comparison is the mitigation and depends on people doing it. Someone who
 lost access may have copied what they saw: rotation protects future values, not past ones,
-so change the password at the service too. Invitations are not emailed (there is no mail
-service); the invitee sees them after signing in with that address.
+so change the password at the service too. Workspace invitations are not emailed; the
+invitee sees them after signing in with that address.
+
+## Sharing items with people
+
+| Property | How | Verified by |
+|---|---|---|
+| Server cannot read shared items | Per-item key, wrapped by the vault key and sealed to each recipient | `people-sharing.test.ts` "re-keys the item" |
+| Only a verified address receives | Pending until the account at that email is verified and has keys; seals for any other account refused | "invites by email", "refuses a seal" |
+| Least privilege | View-only cannot edit; recipients never see history, tags or projects | "does not let anyone else open it", "lets an editor change" |
+| Revocation | Row deleted, item flagged and re-keyed for everyone who keeps access | "removing someone flags the item" |
+| Expiry | Expired shares return nothing | "an expired share stops working" |
+| Abuse limits | Verified senders only; lookup 30/min, create 20/min and 100/day; one email per recipient per hour; no item names in email | "an unverified sender cannot share" |
 
 ## Operator dashboard
 

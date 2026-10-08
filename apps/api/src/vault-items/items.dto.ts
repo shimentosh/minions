@@ -1,6 +1,7 @@
 import { Type } from "class-transformer";
 import {
   ArrayMaxSize,
+  ArrayMinSize,
   IsArray,
   IsBoolean,
   IsIn,
@@ -67,6 +68,20 @@ export class PatchItemDto {
   @Length(1, 40, { each: true })
   tags?: string[];
   @IsOptional() @IsString() @Length(1, 200) name?: string;
+}
+
+/** Moves, favourites or tags many items at once. Only plaintext organising columns change. */
+export class BulkPatchItemsDto {
+  @IsArray() @ArrayMinSize(1) @ArrayMaxSize(500) @IsUUID(4, { each: true }) ids!: string[];
+  @IsOptional() @IsBoolean() favorite?: boolean;
+  @IsOptional() @IsUUID(4) projectId?: string | null;
+  @IsOptional() @IsUUID(4) collectionId?: string | null;
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(30)
+  @IsString({ each: true })
+  @Length(1, 40, { each: true })
+  addTags?: string[];
 }
 
 export class ListItemsQuery {

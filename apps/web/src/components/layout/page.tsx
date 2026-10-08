@@ -7,6 +7,7 @@ import { Tooltip, TooltipPopup, TooltipTrigger } from "@/components/ui/tooltip";
 import { cn } from "@/lib/cn";
 import { useSession } from "@/lib/session";
 import { useUi } from "@/lib/ui-store";
+import { HubTabs } from "./hubs";
 import { UserMenu } from "./user-menu";
 
 /** Shared header actions, top-right on every page, as in the reference's HeaderActions. */
@@ -70,32 +71,35 @@ export function Page({
 }) {
   return (
     <>
-      <header className="sticky top-0 z-20 flex h-10 shrink-0 items-center gap-2 border-border border-b bg-card p-2 md:rounded-t-xl">
-        <SidebarTrigger className="-ml-1 h-6 w-6" />
-        <div className="mx-1.5 h-4 w-px shrink-0 bg-border/80" />
-        <nav aria-label="Breadcrumb" className="flex min-w-0 items-center gap-1 text-xs">
-          <Link to="/" className="text-card-foreground/70 hover:text-card-foreground">
-            Minions
-          </Link>
-          {[...crumbs, { label: title }].map((c) => (
-            <span key={`${c.to ?? ""}${c.label}`} className="flex min-w-0 items-center gap-1">
-              <ChevronRight className="size-3 shrink-0 text-muted-foreground/60" />
-              {c.to ? (
-                <Link
-                  to={c.to}
-                  className="truncate text-card-foreground/70 hover:text-card-foreground"
-                >
-                  {c.label}
-                </Link>
-              ) : (
-                <span className="truncate text-card-foreground">{c.label}</span>
-              )}
-            </span>
-          ))}
-        </nav>
-        {actions && <div className="ml-3 hidden items-center gap-1.5 sm:flex">{actions}</div>}
-        <HeaderActions />
-      </header>
+      <div className="sticky top-0 z-20 shrink-0 md:rounded-t-xl">
+        <header className="flex h-10 items-center gap-2 border-border border-b bg-card p-2 md:rounded-t-xl">
+          <SidebarTrigger className="-ml-1 h-6 w-6" />
+          <div className="mx-1.5 h-4 w-px shrink-0 bg-border/80" />
+          <nav aria-label="Breadcrumb" className="flex min-w-0 items-center gap-1 text-xs">
+            <Link to="/" className="text-card-foreground/70 hover:text-card-foreground">
+              Minions
+            </Link>
+            {[...crumbs, { label: title }].map((c) => (
+              <span key={`${c.to ?? ""}${c.label}`} className="flex min-w-0 items-center gap-1">
+                <ChevronRight className="size-3 shrink-0 text-muted-foreground/60" />
+                {c.to ? (
+                  <Link
+                    to={c.to}
+                    className="truncate text-card-foreground/70 hover:text-card-foreground"
+                  >
+                    {c.label}
+                  </Link>
+                ) : (
+                  <span className="truncate text-card-foreground">{c.label}</span>
+                )}
+              </span>
+            ))}
+          </nav>
+          {actions && <div className="ml-3 hidden items-center gap-1.5 sm:flex">{actions}</div>}
+          <HeaderActions />
+        </header>
+        <HubTabs />
+      </div>
       <div className={cn(fill ? "flex min-h-0 flex-1" : "flex-1", className)}>{children}</div>
     </>
   );

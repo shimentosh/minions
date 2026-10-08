@@ -29,6 +29,8 @@ import {
   normalizeHost,
   openSealedKey,
   type Page,
+  type SharedItemDetail,
+  type SharedWithMeItem,
   sealContext,
   secretFingerprint,
   toBase64,
@@ -70,6 +72,8 @@ interface SessionData {
   /** Sharing private key (PKCS#8), for workspace credentials. Memory-only, like the vault key. */
   privateKey?: string;
   userId?: string;
+  /** The personal vault's id: the AAD of item keys wrapped by the vault key. */
+  vaultId?: string;
   stretchedKey?: string;
   autoLockMinutes?: number;
   lastActivity?: number;
@@ -169,6 +173,7 @@ async function openVault(stretchedKey: Uint8Array<ArrayBuffer>, keys: VaultKeys)
   await session.set({
     ...(pk ? { privateKey: toBase64(pk), userId: keys.userId } : {}),
     vaultKey: toBase64(vk),
+    vaultId: keys.vaultId,
     status: "unlocked",
     autoLockMinutes: me.user.autoLockMinutes,
     email: me.user.email,
@@ -224,10 +229,23 @@ interface OpenedItem {
   key: Uint8Array<ArrayBuffer>;
   workspaceId?: string;
   permission?: "VIEW" | "MANAGE";
+  /** Someone else's item, shared with this user. */
+  shared?: boolean;
 }
 
-function itemPath(id: string, workspaceId?: string) {
+function itemPath(id: string, workspaceId?: string, shared?: boolean) {
+  if (shared) return `/shared/items/${id}`;
   return workspaceId ? `/workspaces/${workspaceId}/items/${id}` : `/vault/items/${id}`;
+}
+
+/** Items shared with the user, in the popup's list shape. */
+function listShared(rows: SharedWithMeItem[]): ListedItem[] {
+  return rows.map(({ permission, sharedBy, ...r }) => ({
+    ...r,
+    shared: true,
+    sharedBy: sharedBy.name,
+    sharedPermission: permission,
+  }));
 }
 
 async function sharingKey() {
@@ -242,9 +260,28 @@ async function sharingKey() {
  * Fetches one item and opens its key. The server decides whether this user
  * may have it; the workspace id only says which route to ask.
  */
-async function openItem(id: string, workspaceId?: string): Promise<OpenedItem> {
-  if (!workspaceId)
-    return { item: await api<VaultItemDetail>(itemPath(id)), key: await vaultKey() };
+async function openItem(id: string, workspaceId?: string, shared?: boolean): Promise<OpenedItem> {
+  if (shared) {
+    // Shared with this user: the item key is sealed to their public key.
+    const item = await api<SharedItemDetail>(itemPath(id, undefined, true));
+    const { privateKey, userId } = await sharingKey();
+    const key = await openSealedKey(
+      privateKey,
+      item.sealedItemKey,
+      sealContext.itemKey(id, userId),
+    );
+    return { item, key, shared: true };
+  }
+  if (!workspaceId) {
+    const item = await api<VaultItemDetail>(itemPath(id));
+    const vk = await vaultKey();
+    if (!item.protectedItemKey) return { item, key: vk };
+    // Shared with people: the item has its own key, wrapped by the vault key.
+    const vaultId = (await session.get()).vaultId ?? (await api<MeResponse>("/auth/me")).vaultId;
+    const key = await unwrapKey(vk, item.protectedItemKey, keyAad.itemKeyForVault(vaultId, id));
+    vk.fill(0);
+    return { item, key };
+  }
   const item = await api<WorkspaceItemDetail>(itemPath(id, workspaceId));
   const { privateKey, userId } = await sharingKey();
   let key: Uint8Array<ArrayBuffer>;
@@ -272,7 +309,7 @@ async function decryptField(o: OpenedItem, key: string): Promise<string | null> 
 }
 
 async function recordUsage(o: OpenedItem, action: string, field?: string) {
-  await api(`${itemPath(o.item.id, o.workspaceId)}/usage`, {
+  await api(`${itemPath(o.item.id, o.workspaceId, o.shared)}/usage`, {
     method: "POST",
     body: { action, field },
   }).catch(() => undefined);
@@ -280,11 +317,12 @@ async function recordUsage(o: OpenedItem, action: string, field?: string) {
 
 /** Personal and workspace logins for a host. Workspace ones are skipped if unavailable. */
 async function matchAll(host: string): Promise<ListedItem[]> {
-  const [mine, team] = await Promise.all([
+  const [mine, team, shared] = await Promise.all([
     api<VaultItemSummary[]>("/vault/items/match", { query: { host } }),
     api<ListedItem[]>("/workspaces/items/match", { query: { host } }).catch(() => []),
+    api<SharedWithMeItem[]>("/shared/match", { query: { host } }).catch(() => []),
   ]);
-  return [...mine, ...team];
+  return [...mine, ...team, ...listShared(shared)];
 }
 
 async function buildLogin(
@@ -456,17 +494,18 @@ async function handle(req: Request, sender: chrome.runtime.MessageSender): Promi
     }
     case "search": {
       await vaultKey();
-      const [page, team] = await Promise.all([
+      const [page, team, shared] = await Promise.all([
         api<Page<VaultItemSummary>>("/vault/items", { query: { q: req.q, limit: "10" } }),
         api<ListedItem[]>("/workspaces/items/search", { query: { q: req.q } }).catch(() => []),
+        api<SharedWithMeItem[]>("/shared/search", { query: { q: req.q } }).catch(() => []),
       ]);
-      return [...page.items, ...team] satisfies ListedItem[];
+      return [...page.items, ...team, ...listShared(shared)] satisfies ListedItem[];
     }
     case "fill": {
       const tab = await chrome.tabs.get(req.tabId);
       const pageUrl = tab.url ?? "";
       const host = normalizeHost(pageUrl);
-      const opened = await openItem(req.itemId, req.workspaceId);
+      const opened = await openItem(req.itemId, req.workspaceId, req.shared);
       const { item } = opened;
       const savedUrl = item.fields.find((f) => f.key === "url" && !f.sensitive)?.value ?? null;
       // Only fill a page whose site matches the item (public-suffix aware,
@@ -496,7 +535,7 @@ async function handle(req: Request, sender: chrome.runtime.MessageSender): Promi
       return null;
     }
     case "copy": {
-      const opened = await openItem(req.itemId, req.workspaceId);
+      const opened = await openItem(req.itemId, req.workspaceId, req.shared);
       const value =
         (await decryptField(opened, req.field)) ??
         (req.field === "username" ? await decryptField(opened, "email") : null);
@@ -508,7 +547,7 @@ async function handle(req: Request, sender: chrome.runtime.MessageSender): Promi
       return value;
     }
     case "totp": {
-      const opened = await openItem(req.itemId, req.workspaceId);
+      const opened = await openItem(req.itemId, req.workspaceId, req.shared);
       const secret = await decryptField(opened, "totp");
       opened.key.fill(0);
       if (!secret) throw new Error("No 2FA secret on this item");
@@ -586,7 +625,8 @@ async function handle(req: Request, sender: chrome.runtime.MessageSender): Promi
         // Known login: only offer an update if the password actually changed,
         // and for a team login only to someone allowed to change it.
         if (same.workspaceId && same.permission !== "MANAGE") return null;
-        const opened = await openItem(same.id, same.workspaceId);
+        if (same.shared && same.sharedPermission !== "EDIT") return null;
+        const opened = await openItem(same.id, same.workspaceId, same.shared);
         const unchanged = (await decryptField(opened, "password")) === req.password;
         opened.key.fill(0);
         if (unchanged) return null;
@@ -603,8 +643,11 @@ async function handle(req: Request, sender: chrome.runtime.MessageSender): Promi
               updateItemId: same.id,
               updateItemName: same.workspaceName
                 ? `${same.name} (${same.workspaceName})`
-                : same.name,
+                : same.sharedBy
+                  ? `${same.name} (from ${same.sharedBy})`
+                  : same.name,
               ...(same.workspaceId ? { updateWorkspaceId: same.workspaceId } : {}),
+              ...(same.shared ? { updateShared: true } : {}),
             }
           : {}),
       };
@@ -631,9 +674,14 @@ async function handle(req: Request, sender: chrome.runtime.MessageSender): Promi
       }
       if (req.action === "ignore") return null;
       if (req.action === "update" && pending.updateItemId) {
-        const opened = await openItem(pending.updateItemId, pending.updateWorkspaceId);
+        const opened = await openItem(
+          pending.updateItemId,
+          pending.updateWorkspaceId,
+          pending.updateShared,
+        );
         const { item, key } = opened;
-        const team = !!pending.updateWorkspaceId;
+        // Workspace and shared items: no personal projects, no reuse fingerprint.
+        const team = !!pending.updateWorkspaceId || !!pending.updateShared;
         const fields = item.fields.map((f) => ({
           key: f.key,
           value: f.value,
@@ -648,7 +696,7 @@ async function handle(req: Request, sender: chrome.runtime.MessageSender): Promi
         const next = fields.some((f) => f.key === "password")
           ? fields.map((f) => (f.key === "password" ? pw : f))
           : [...fields, pw];
-        await api(itemPath(item.id, pending.updateWorkspaceId), {
+        await api(itemPath(item.id, pending.updateWorkspaceId, pending.updateShared), {
           method: "PUT",
           body: {
             id: item.id,
@@ -667,7 +715,12 @@ async function handle(req: Request, sender: chrome.runtime.MessageSender): Promi
               // Reuse detection compares personal passwords only.
               ...(team
                 ? {}
-                : { passwordFingerprint: await secretFingerprint(key, pending.password) }),
+                : {
+                    passwordFingerprint: await secretFingerprint(
+                      await vaultKey(),
+                      pending.password,
+                    ),
+                  }),
             },
           },
         });

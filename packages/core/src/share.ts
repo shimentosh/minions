@@ -97,6 +97,7 @@ export interface CreateShareRequest {
   itemId?: string | null;
   label: string;
   ciphertext: string;
+  /** 0 = never expires (then a view limit or revoking ends it). */
   expiresInMinutes: number;
   maxViews: number | null;
   includesTotp: boolean;
@@ -107,7 +108,8 @@ export interface CreateShareRequest {
 
 export interface ShareMeta {
   id: string;
-  expiresAt: string;
+  /** null: never expires. */
+  expiresAt: string | null;
   viewsLeft: number | null;
   requiresPassphrase: boolean;
   passphraseSalt: string | null;
@@ -119,7 +121,8 @@ export interface ShareSummary {
   id: string;
   itemId: string | null;
   label: string;
-  expiresAt: string;
+  /** null: never expires. */
+  expiresAt: string | null;
   maxViews: number | null;
   viewCount: number;
   includesTotp: boolean;

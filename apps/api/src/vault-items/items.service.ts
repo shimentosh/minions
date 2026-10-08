@@ -26,7 +26,13 @@ import type { AuthContext } from "../common/auth-context";
 import { PrismaService } from "../common/prisma.service";
 import type { Prisma } from "../generated/prisma/client";
 import { FindingsStore } from "../security/findings-store";
-import type { ItemFieldDto, ListItemsQuery, PatchItemDto, UpsertItemDto } from "./items.dto";
+import type {
+  BulkPatchItemsDto,
+  ItemFieldDto,
+  ListItemsQuery,
+  PatchItemDto,
+  UpsertItemDto,
+} from "./items.dto";
 
 const SUMMARY_INCLUDE = {
   project: { select: { id: true, name: true, color: true } },
@@ -34,7 +40,15 @@ const SUMMARY_INCLUDE = {
   tags: { select: { tag: { select: { name: true } } } },
 } satisfies Prisma.VaultItemInclude;
 
-type ItemWithSummary = Prisma.VaultItemGetPayload<{ include: typeof SUMMARY_INCLUDE }>;
+/** Personal-vault queries also count who each item is shared with. */
+const PERSONAL_INCLUDE = {
+  ...SUMMARY_INCLUDE,
+  _count: { select: { peopleShares: true } },
+} satisfies Prisma.VaultItemInclude;
+
+type ItemWithSummary = Prisma.VaultItemGetPayload<{ include: typeof SUMMARY_INCLUDE }> & {
+  _count?: { peopleShares?: number };
+};
 
 const HOST_FIELDS = ["url", "base_url", "console_url", "endpoint", "docs_url"];
 const USERNAME_FIELDS = ["username", "email", "account", "licensed_to"];
@@ -88,6 +102,7 @@ export function toSummary(i: ItemWithSummary): VaultItemSummary {
     createdAt: i.createdAt.toISOString(),
     updatedAt: i.updatedAt.toISOString(),
     deletedAt: i.deletedAt?.toISOString() ?? null,
+    ...(i._count?.peopleShares !== undefined ? { sharedWith: i._count.peopleShares } : {}),
   };
 }
 
@@ -439,6 +454,35 @@ export class ItemsService {
     return toSummary(item);
   }
 
+  /** `patch` for many items at once. Every id must be a live item in the caller's vault. */
+  async patchMany(auth: AuthContext, dto: BulkPatchItemsDto) {
+    const ids = [...new Set(dto.ids)];
+    const owned = await this.prisma.vaultItem.count({
+      where: { id: { in: ids }, vaultId: auth.vaultId, deletedAt: null },
+    });
+    if (owned !== ids.length) throw new NotFoundException();
+    await this.assertOwnedRefs(auth.vaultId, dto.projectId, dto.collectionId);
+    await this.prisma.$transaction(async (tx) => {
+      if (dto.addTags?.length) {
+        const tagIds = await this.tagIds(tx, auth.vaultId, dto.addTags);
+        await tx.vaultItemTag.createMany({
+          data: ids.flatMap((itemId) => tagIds.map((tagId) => ({ itemId, tagId }))),
+          skipDuplicates: true,
+        });
+      }
+      await tx.vaultItem.updateMany({
+        where: { id: { in: ids }, vaultId: auth.vaultId },
+        data: {
+          ...(dto.favorite !== undefined ? { favorite: dto.favorite } : {}),
+          ...(dto.projectId !== undefined ? { projectId: dto.projectId } : {}),
+          ...(dto.collectionId !== undefined ? { collectionId: dto.collectionId } : {}),
+        },
+      });
+    });
+    await this.findings.markDirty(auth.vaultId);
+    return { updated: ids.length };
+  }
+
   async get(auth: AuthContext, id: string, opts: { log?: boolean } = {}): Promise<VaultItemDetail> {
     const item = await this.prisma.vaultItem.findFirst({
       where: { id, vaultId: auth.vaultId },
@@ -448,7 +492,7 @@ export class ItemsService {
         usedBy: { include: { project: { select: { id: true, name: true, color: true } } } },
         relationsFrom: { include: { to: { include: SUMMARY_INCLUDE } } },
         relationsTo: { include: { from: { include: SUMMARY_INCLUDE } } },
-        _count: { select: { versions: true } },
+        _count: { select: { versions: true, peopleShares: true } },
       },
     });
     if (!item) throw new NotFoundException();
@@ -489,6 +533,10 @@ export class ItemsService {
           })),
       ],
       versionCount: item._count.versions,
+      // Workspace items carry their key in their own envelope (WorkspaceItemsService).
+      ...(auth.workspaceId
+        ? {}
+        : { protectedItemKey: item.protectedItemKey, rekeyNeeded: item.rekeyNeeded }),
     };
   }
 
@@ -544,7 +592,7 @@ export class ItemsService {
         orderBy,
         take: limit + 1,
         ...(q.cursor ? { cursor: { id: q.cursor }, skip: 1 } : {}),
-        include: SUMMARY_INCLUDE,
+        include: scope ? SUMMARY_INCLUDE : PERSONAL_INCLUDE,
       }),
       q.cursor ? Promise.resolve(undefined) : this.prisma.vaultItem.count({ where }),
     ]);
@@ -610,6 +658,7 @@ export class ItemsService {
             provider: true,
             host: true,
             favorite: true,
+            protectedItemKey: true,
           },
         },
       },
@@ -622,6 +671,7 @@ export class ItemsService {
       type: r.item.type,
       subtitle: r.item.username ?? r.item.provider ?? r.item.host,
       favorite: r.item.favorite,
+      protectedItemKey: r.item.protectedItemKey,
       field: { key: "totp", value: r.value, sensitive: r.sensitive },
     }));
   }

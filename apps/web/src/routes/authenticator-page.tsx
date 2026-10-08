@@ -17,6 +17,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { TotpCode } from "@/components/vault/totp-code";
 import { errorMessage, get, post } from "@/lib/api";
 import { ItemGlyph } from "@/lib/item-icons";
+import { openPersonalItem } from "@/lib/people-sharing";
 import { decodeQrImage, parseGoogleMigration } from "@/lib/qr";
 import { useInvalidateVault } from "@/lib/queries";
 import { requireVaultKey } from "@/lib/session";
@@ -30,6 +31,8 @@ interface TotpRow {
   type: string;
   subtitle: string | null;
   favorite: boolean;
+  /** Set for items shared with people: their own key, wrapped by the vault key. */
+  protectedItemKey: string | null;
   field: ItemField;
 }
 
@@ -56,6 +59,7 @@ export function AuthenticatorPage() {
       const out: Record<string, string> = {};
       for (const row of data) {
         try {
+          await openPersonalItem(row);
           out[row.id] = await revealField(row.id, row.field);
         } catch {
           /* shown as unreadable */

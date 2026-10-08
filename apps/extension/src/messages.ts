@@ -9,11 +9,18 @@ export interface StateResponse {
   webUrl: string;
 }
 
-/** A personal item, or a workspace item (then `workspaceId` says where its key comes from). */
+/**
+ * A personal item, a workspace item (then `workspaceId` says where its key
+ * comes from), or an item someone shared with the user (`shared`).
+ */
 export type ListedItem = VaultItemSummary & {
   workspaceId?: string;
   workspaceName?: string;
   permission?: "VIEW" | "MANAGE";
+  shared?: boolean;
+  /** Who shared it, for the label. */
+  sharedBy?: string;
+  sharedPermission?: "VIEW" | "EDIT";
 };
 
 export interface MatchResponse {
@@ -31,6 +38,8 @@ export interface PendingSave {
   updateItemName?: string;
   /** The item to update is a workspace credential the user can manage. */
   updateWorkspaceId?: string;
+  /** The item to update was shared with the user, with edit access. */
+  updateShared?: boolean;
 }
 
 export type SaveAction = "save" | "update" | "ignore" | "never";
@@ -45,9 +54,9 @@ export type Request =
   | { type: "logout" }
   | { type: "match"; tabId: number }
   | { type: "search"; q: string }
-  | { type: "fill"; tabId: number; itemId: string; workspaceId?: string }
-  | { type: "copy"; itemId: string; field: string; workspaceId?: string }
-  | { type: "totp"; itemId: string; workspaceId?: string }
+  | { type: "fill"; tabId: number; itemId: string; workspaceId?: string; shared?: boolean }
+  | { type: "copy"; itemId: string; field: string; workspaceId?: string; shared?: boolean }
+  | { type: "totp"; itemId: string; workspaceId?: string; shared?: boolean }
   | { type: "generate"; options: PasswordOptions }
   | { type: "capture"; text: string }
   | { type: "saveCapture"; text: string; name: string }
@@ -75,6 +84,7 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const str = (v: unknown, max: number) => typeof v === "string" && v.length <= max;
 const SAVE_ACTIONS: readonly SaveAction[] = ["save", "update", "ignore", "never"];
 const optionalId = (v: unknown) => v === undefined || (str(v, 36) && UUID.test(v as string));
+const optionalBool = (v: unknown) => v === undefined || typeof v === "boolean";
 
 /**
  * Shape check for every incoming message. A content script runs on pages the
@@ -106,17 +116,24 @@ export function isValidRequest(msg: unknown): msg is Request {
         Number.isInteger(m.tabId) &&
         str(m.itemId, 36) &&
         UUID.test(m.itemId as string) &&
-        optionalId(m.workspaceId)
+        optionalId(m.workspaceId) &&
+        optionalBool(m.shared)
       );
     case "copy":
       return (
         str(m.itemId, 36) &&
         UUID.test(m.itemId as string) &&
         str(m.field, 120) &&
-        optionalId(m.workspaceId)
+        optionalId(m.workspaceId) &&
+        optionalBool(m.shared)
       );
     case "totp":
-      return str(m.itemId, 36) && UUID.test(m.itemId as string) && optionalId(m.workspaceId);
+      return (
+        str(m.itemId, 36) &&
+        UUID.test(m.itemId as string) &&
+        optionalId(m.workspaceId) &&
+        optionalBool(m.shared)
+      );
     case "generate":
       return !!m.options && typeof m.options === "object";
     case "capture":

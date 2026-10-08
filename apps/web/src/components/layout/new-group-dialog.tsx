@@ -37,7 +37,7 @@ export function NewGroupDialog({
 }: {
   kind: "project" | "collection";
   trigger: ReactElement;
-  onCreated?: (id: string) => void;
+  onCreated?: (id: string, name: string) => void;
 }) {
   const [open, setOpen] = useState(false);
   const [name, setName] = useState("");
@@ -59,7 +59,7 @@ export function NewGroupDialog({
       setOpen(false);
       setName("");
       setDescription("");
-      if (onCreated) onCreated(row.id);
+      if (onCreated) onCreated(row.id, name.trim());
       else if (kind === "project")
         void navigate({ to: "/projects/$projectId", params: { projectId: row.id } });
       else void navigate({ to: "/vault", search: { collectionId: row.id } });

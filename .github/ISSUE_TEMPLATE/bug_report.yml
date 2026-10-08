@@ -1,0 +1,56 @@
+name: Bug report
+description: Something does not work as expected.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting! **Never paste real passwords, keys or vault data here.**
+        Security problems: please use the private security report instead.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+      description: What did you do, what did you expect, and what happened instead?
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Open the vault
+        2. Click …
+        3. See …
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Where?
+      multiple: true
+      options:
+        - Web app
+        - Chrome extension
+        - Desktop app
+        - API / server
+        - Import
+        - Self-hosting / Docker
+        - Other
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Commit or version
+      placeholder: e.g. a1b2c3d
+  - type: input
+    id: env
+    attributes:
+      label: Browser and OS
+      placeholder: e.g. Chrome 140 on macOS 15
+  - type: textarea
+    id: logs
+    attributes:
+      label: Screenshots or logs
+      description: Remove anything sensitive first.

@@ -4,9 +4,14 @@ import {
   decryptString,
   encryptString,
   getItemType,
+  keyAad,
   secretFingerprint,
+  unwrapKey,
+  wipe,
+  wrapKey,
 } from "@minions/core";
 import { get, post } from "./api";
+import { useSession } from "./session";
 
 /**
  * Re-encrypts the personal vault from one vault key to another. Runs only on
@@ -25,6 +30,8 @@ interface ItemRow {
   id: string;
   type: string;
   hasPasswordFingerprint: boolean;
+  /** Items shared with people: their own key, wrapped by the vault key. */
+  protectedItemKey: string | null;
   fields: { key: string; value: string }[];
   versions: { id: string; fields: { key: string; value: string }[] }[];
 }
@@ -58,7 +65,45 @@ async function reencrypt(oldKey: Key, newKey: Key, envelope: string, context: st
   return { value: await encryptString(newKey, plain, context), plain };
 }
 
+/**
+ * An item shared with people keeps its own key (recipients hold it sealed):
+ * only the wrapper moves to the new vault key. Its fingerprint is recomputed.
+ */
+async function rotateKeyedItem(oldKey: Key, newKey: Key, row: ItemRow) {
+  const vaultId = useSession.getState().me?.vaultId;
+  if (!vaultId) throw new Error("Vault is locked");
+  const context = keyAad.itemKeyForVault(vaultId, row.id);
+  let itemKey: Key;
+  try {
+    itemKey = await unwrapKey(oldKey, row.protectedItemKey!, context);
+  } catch (e) {
+    if (!(e instanceof DecryptionError)) throw e;
+    itemKey = await unwrapKey(newKey, row.protectedItemKey!, context);
+  }
+  try {
+    const passwordField = getItemType(row.type)?.passwordField;
+    const pw = row.fields.find((f) => f.key === passwordField);
+    return {
+      id: row.id,
+      fields: [],
+      versions: [],
+      protectedItemKey: await wrapKey(newKey, itemKey, context),
+      ...(row.hasPasswordFingerprint && pw
+        ? {
+            passwordFingerprint: await secretFingerprint(
+              newKey,
+              await decryptString(itemKey, pw.value, aad.field(row.id, pw.key)),
+            ),
+          }
+        : {}),
+    };
+  } finally {
+    wipe(itemKey);
+  }
+}
+
 async function rotateItem(oldKey: Key, newKey: Key, row: ItemRow) {
+  if (row.protectedItemKey) return rotateKeyedItem(oldKey, newKey, row);
   const passwordField = getItemType(row.type)?.passwordField;
   let password: string | null = null;
   const fields = [];

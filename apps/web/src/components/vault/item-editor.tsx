@@ -63,6 +63,7 @@ import { ApiError, del, errorMessage, get, post, put } from "@/lib/api";
 import { cn } from "@/lib/cn";
 import { fieldIcon } from "@/lib/field-icons";
 import { ItemGlyph } from "@/lib/item-icons";
+import { loadPersonalItem, loadSharedItem } from "@/lib/people-sharing";
 import { useCollections, useInvalidateVault, useProjects } from "@/lib/queries";
 import { toast } from "@/lib/toast";
 import { type EditorRequest, useUi } from "@/lib/ui-store";
@@ -368,6 +369,8 @@ function EditorForm({
   const navigate = useNavigate();
   // In a workspace: its folders, no personal projects, links or AI suggestions.
   const ws = request.workspaceId;
+  // Someone else's item shared with edit access: its fields only, never how the owner files it.
+  const shared = !!request.shared;
   const { data: personalProjects } = useProjects();
   const { data: personalCollections } = useCollections();
   const { data: folders } = useWorkspaceFolders(ws);
@@ -502,6 +505,7 @@ function EditorForm({
   const dynamicKeys = Object.keys(values).filter((k) => k.startsWith(DYNAMIC_FIELD_PREFIX));
   const canLink =
     !ws &&
+    !shared &&
     !!def &&
     type !== "LOGIN" &&
     def.fields.some((f) => f.key === "password") &&
@@ -511,7 +515,7 @@ function EditorForm({
   const accountHint = values.registrar || values.provider || values.bank || values.issuer || "";
   const { data: suggestions } = useQuery({
     queryKey: ["suggestions", type],
-    enabled: !!def && !ws,
+    enabled: !!def && !ws && !shared,
     staleTime: 60_000,
     queryFn: () =>
       get<Record<string, { value: string; count: number }[]>>("/vault/items/suggestions", { type }),
@@ -577,14 +581,16 @@ function EditorForm({
         },
         existing && plain ? { item: existing, plain } : undefined,
       );
-      const saved = ws
-        ? existing
-          ? await put<VaultItemSummary>(`/workspaces/${ws}/items/${id}`, body)
-          : await saveNewWorkspaceItem(ws, body, access)
-        : existing
-          ? await put<VaultItemSummary>(`/vault/items/${id}`, body)
-          : await post<VaultItemSummary>("/vault/items", body);
-      if (!ws) await syncLink(saved.id);
+      const saved = shared
+        ? await put<VaultItemSummary>(`/shared/items/${id}`, body)
+        : ws
+          ? existing
+            ? await put<VaultItemSummary>(`/workspaces/${ws}/items/${id}`, body)
+            : await saveNewWorkspaceItem(ws, body, access)
+          : existing
+            ? await put<VaultItemSummary>(`/vault/items/${id}`, body)
+            : await post<VaultItemSummary>("/vault/items", body);
+      if (!ws && !shared) await syncLink(saved.id);
       // Teach the classifier what the user actually chose.
       const chosenProject = projects?.find((p) => p.id === projectId)?.name;
       const chosenCollection = collections?.find((c) => c.id === collectionId)?.name;
@@ -985,7 +991,12 @@ function EditorForm({
           </Button>
         </div>
 
-        <div className="grid gap-3 rounded-lg border bg-muted/30 p-3 sm:grid-cols-2">
+        <div
+          className={cn(
+            "grid gap-3 rounded-lg border bg-muted/30 p-3 sm:grid-cols-2",
+            shared && "hidden",
+          )}
+        >
           <div className={cn("space-y-1.5", ws && "hidden")}>
             <Label className="flex items-center gap-1.5">
               <FolderKanban className="size-3.5 text-muted-foreground" aria-hidden /> Project
@@ -1120,7 +1131,9 @@ export function ItemEditorDialog() {
     queryFn: async () => {
       const item = request?.workspaceId
         ? await loadWorkspaceItem(request.workspaceId, itemId!)
-        : await get<VaultItemDetail>(`/vault/items/${itemId}`);
+        : request?.shared
+          ? await loadSharedItem(itemId!)
+          : await loadPersonalItem(itemId!);
       return { item, plain: await decryptAll(item) };
     },
   });

@@ -2,6 +2,38 @@
   "name": "minions",
   "private": true,
   "version": "0.1.0",
+  "description": "Open-source, self-hosted, end-to-end encrypted password manager and secrets vault for passwords, API keys, .env files, servers, 2FA codes, cards and notes.",
+  "keywords": [
+    "password-manager",
+    "secrets-manager",
+    "end-to-end-encryption",
+    "self-hosted",
+    "open-source",
+    "bitwarden-alternative",
+    "1password-alternative",
+    "vault",
+    "totp",
+    "2fa",
+    "authenticator",
+    "api-keys",
+    "env",
+    "dotenv",
+    "chrome-extension",
+    "tauri",
+    "nestjs",
+    "react",
+    "postgresql",
+    "argon2"
+  ],
+  "homepage": "https://github.com/shimentosh/minions#readme",
+  "bugs": {
+    "url": "https://github.com/shimentosh/minions/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/shimentosh/minions.git"
+  },
+  "license": "AGPL-3.0-only",
   "packageManager": "pnpm@11.5.3",
   "engines": {
     "node": ">=22.12.0"

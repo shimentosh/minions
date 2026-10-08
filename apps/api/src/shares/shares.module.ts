@@ -41,7 +41,8 @@ import { VaultUnlockedGuard } from "../common/guards";
 import { PrismaService } from "../common/prisma.service";
 import { safeEqual, sha256 } from "../common/server-crypto";
 
-const EXPIRY_CHOICES = [15, 60, 1440, 10080, 43200]; // 15 min, 1 h, 1 day, 7 days, 30 days
+// 15 min, 1 h, 1 day, 7 days, 30 days; 0 = never (a view limit or revoking ends it).
+const EXPIRY_CHOICES = [15, 60, 1440, 10080, 43200, 0];
 const MAX_WRONG_PASSPHRASE = 10;
 
 class CreateShareDto {
@@ -65,7 +66,7 @@ type Row = Awaited<ReturnType<PrismaService["share"]["findUniqueOrThrow"]>>;
 function status(s: Row): ShareSummary["status"] {
   if (s.revokedAt) return "revoked";
   if (s.maxViews !== null && s.viewCount >= s.maxViews) return "used";
-  if (s.expiresAt <= new Date()) return "expired";
+  if (s.expiresAt && s.expiresAt <= new Date()) return "expired";
   return "active";
 }
 
@@ -120,7 +121,9 @@ export class SharesService implements OnModuleInit, OnModuleDestroy {
         itemId: item?.id ?? null,
         label: dto.label.trim(),
         ciphertext: dto.ciphertext,
-        expiresAt: new Date(Date.now() + dto.expiresInMinutes * 60_000),
+        expiresAt: dto.expiresInMinutes
+          ? new Date(Date.now() + dto.expiresInMinutes * 60_000)
+          : null,
         maxViews: dto.maxViews,
         includesTotp: dto.includesTotp,
         passphraseSalt: dto.passphraseSalt ?? null,
@@ -140,7 +143,7 @@ export class SharesService implements OnModuleInit, OnModuleDestroy {
       id: s.id,
       itemId: s.itemId,
       label: s.label,
-      expiresAt: s.expiresAt.toISOString(),
+      expiresAt: s.expiresAt?.toISOString() ?? null,
       maxViews: s.maxViews,
       viewCount: s.viewCount,
       includesTotp: s.includesTotp,
@@ -181,7 +184,7 @@ export class SharesService implements OnModuleInit, OnModuleDestroy {
     const available = st === "active" && !!s.ciphertext;
     return {
       id: s.id,
-      expiresAt: s.expiresAt.toISOString(),
+      expiresAt: s.expiresAt?.toISOString() ?? null,
       viewsLeft: s.maxViews === null ? null : Math.max(0, s.maxViews - s.viewCount),
       requiresPassphrase: !!s.accessHash,
       passphraseSalt: s.passphraseSalt,
@@ -235,8 +238,10 @@ export class SharesService implements OnModuleInit, OnModuleDestroy {
         itemId: string | null;
       }[]
     >`
-      UPDATE shares SET "viewCount" = "viewCount" + 1, "lastViewedAt" = now()
-      WHERE id = ${id}::uuid AND ciphertext IS NOT NULL AND "revokedAt" IS NULL AND "expiresAt" > now()
+      -- Prisma stores timestamps as UTC without a zone; compare in UTC whatever the server's TimeZone.
+      UPDATE shares SET "viewCount" = "viewCount" + 1, "lastViewedAt" = now() AT TIME ZONE 'UTC'
+      WHERE id = ${id}::uuid AND ciphertext IS NOT NULL AND "revokedAt" IS NULL
+        AND ("expiresAt" IS NULL OR "expiresAt" > now() AT TIME ZONE 'UTC')
         AND ("maxViews" IS NULL OR "viewCount" < "maxViews")
       RETURNING ciphertext, "viewCount", "maxViews", "userId", label, "itemId"`;
     const row = rows[0];

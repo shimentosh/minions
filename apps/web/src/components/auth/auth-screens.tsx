@@ -221,7 +221,13 @@ export function SignInScreen() {
   const [mode, setMode] = useState<"login" | "register">(() =>
     window.location.pathname === "/register" ? "register" : "login",
   );
-  const [email, setEmail] = useState("");
+  // An invitation link (someone shared a password) carries the address it was sent to.
+  const [invitedEmail] = useState(() =>
+    window.location.pathname === "/register"
+      ? (new URLSearchParams(window.location.search).get("email") ?? "").slice(0, 254)
+      : "",
+  );
+  const [email, setEmail] = useState(invitedEmail);
   const [name, setName] = useState("");
   const [password, setPassword] = useState("");
   const [confirm, setConfirm] = useState("");
@@ -264,6 +270,12 @@ export function SignInScreen() {
       }
     >
       <form className="space-y-4" onSubmit={submit}>
+        {mode === "register" && invitedEmail && (
+          <p className="rounded-lg bg-info/8 px-3 py-2 text-info-foreground text-sm dark:bg-info/16">
+            Someone shared a password with you. Sign up with this email, confirm it, and it appears
+            under Shared.
+          </p>
+        )}
         {mode === "register" && (
           <div className="space-y-1.5">
             <Label htmlFor="name">Name</Label>

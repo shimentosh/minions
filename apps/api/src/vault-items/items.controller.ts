@@ -16,6 +16,7 @@ import type { Action } from "../activity/activity.service";
 import { Auth, type AuthContext } from "../common/auth-context";
 import { VaultUnlockedGuard } from "../common/guards";
 import {
+  BulkPatchItemsDto,
   ListItemsQuery,
   MatchQuery,
   MergeDto,
@@ -58,6 +59,12 @@ export class ItemsController {
   @Post()
   create(@Auth() auth: AuthContext, @Body() dto: UpsertItemDto) {
     return this.items.create(auth, dto);
+  }
+
+  /** Declared before `:id` so "bulk" is not parsed as an item id. */
+  @Patch("bulk")
+  patchMany(@Auth() auth: AuthContext, @Body() dto: BulkPatchItemsDto) {
+    return this.items.patchMany(auth, dto);
   }
 
   @Get(":id")

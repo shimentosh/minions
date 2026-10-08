@@ -60,7 +60,7 @@ try {
   await page.goto(`${BASE}/`);
   await page.getByLabel("Master password").fill(password);
   await page.getByRole("button", { name: "Unlock" }).click();
-  await page.getByText("Everything sensitive, in one place.").waitFor({ timeout: 30_000 });
+  await page.getByRole("navigation", { name: "Vault" }).waitFor({ timeout: 30_000 });
   if (await page.getByText("Confirm your email address").count())
     throw new Error("banner still shown after verification");
 } catch (e) {

@@ -3,6 +3,7 @@ import {
   createRoute,
   createRouter,
   lazyRouteComponent,
+  Navigate,
   Outlet,
 } from "@tanstack/react-router";
 import { useEffect } from "react";
@@ -15,9 +16,11 @@ import { SidebarInset, SidebarProvider } from "@/components/ui/sidebar";
 import { ToastProvider } from "@/components/ui/toast";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { ItemEditorDialog } from "@/components/vault/item-editor";
+import { MoveDialog, OrganizeDnd } from "@/components/vault/organize";
 import { useAutoLock } from "@/lib/auto-lock";
 import { restoreDesktopSession } from "@/lib/desktop";
 import { useSession } from "@/lib/session";
+import { usePendingSeals } from "@/lib/use-pending-seals";
 import { ActivityPage } from "@/routes/activity-page";
 import { AuthenticatorPage } from "@/routes/authenticator-page";
 import { CleanupPage } from "@/routes/cleanup-page";
@@ -29,6 +32,7 @@ import { OperatorPage } from "@/routes/operator-page";
 import { ProjectPage, ProjectsPage } from "@/routes/projects-page";
 import { PublicSharePage } from "@/routes/public-share-page";
 import { SecurityPage } from "@/routes/security-page";
+import { SharedPage, type SharedSearch } from "@/routes/shared-page";
 import { SharesPage } from "@/routes/shares-page";
 import { VaultPage, type VaultSearch } from "@/routes/vault-page";
 import { VerifyEmailPage } from "@/routes/verify-email-page";
@@ -53,6 +57,7 @@ function readSidebarDefault() {
 /** The signed-in, unlocked app: the reference's sidebar-inset shell. */
 function AppShell() {
   useAutoLock();
+  usePendingSeals();
   return (
     <div className="app-height flex w-full overflow-hidden bg-background md:h-auto md:overflow-visible">
       <SidebarProvider
@@ -60,11 +65,14 @@ function AppShell() {
         defaultOpen={readSidebarDefault()}
         style={{ "--sidebar-width": "calc(var(--spacing) * 60)" } as React.CSSProperties}
       >
-        <AppSidebar />
-        <SidebarInset className="flex min-h-0 flex-1 flex-col overflow-auto md:m-2 md:h-[calc(100svh-1rem)] md:rounded-xl md:border md:border-border/80 md:shadow-sm/5">
-          <VerifyEmailBanner />
-          <Outlet />
-        </SidebarInset>
+        <OrganizeDnd>
+          <AppSidebar />
+          <SidebarInset className="flex min-h-0 flex-1 flex-col overflow-auto md:m-2 md:h-[calc(100svh-1rem)] md:rounded-xl md:border md:border-border/80 md:shadow-sm/5">
+            <VerifyEmailBanner />
+            <Outlet />
+          </SidebarInset>
+        </OrganizeDnd>
+        <MoveDialog />
         <CommandPalette />
         <QuickCaptureDialog />
         <ItemEditorDialog />
@@ -107,11 +115,18 @@ const rootRoute = createRootRoute({
   ),
 });
 
+/** Renders only once unlocked, so the sign-in screen still reads /login or /register. */
+function ToVault() {
+  return <Navigate to="/vault" replace />;
+}
+
 const bool = (v: unknown) => (v === true || v === "true" ? true : undefined);
 const str = (v: unknown) => (typeof v === "string" && v ? v : undefined);
 
 const routes = [
-  createRoute({ getParentRoute: () => rootRoute, path: "/", component: DashboardPage }),
+  // The vault is the start page.
+  createRoute({ getParentRoute: () => rootRoute, path: "/", component: ToVault }),
+  createRoute({ getParentRoute: () => rootRoute, path: "/reports", component: DashboardPage }),
   createRoute({
     getParentRoute: () => rootRoute,
     path: "/vault",
@@ -154,6 +169,15 @@ const routes = [
     component: AuthenticatorPage,
   }),
   createRoute({ getParentRoute: () => rootRoute, path: "/shares", component: SharesPage }),
+  createRoute({
+    getParentRoute: () => rootRoute,
+    path: "/shared",
+    component: SharedPage,
+    validateSearch: (s: Record<string, unknown>): SharedSearch => ({
+      side: s.side === "by-me" ? "by-me" : undefined,
+      item: str(s.item),
+    }),
+  }),
   createRoute({ getParentRoute: () => rootRoute, path: "/s/$shareId", component: PublicSharePage }),
   createRoute({
     getParentRoute: () => rootRoute,
@@ -165,7 +189,14 @@ const routes = [
   createRoute({ getParentRoute: () => rootRoute, path: "/generator", component: GeneratorPage }),
   createRoute({ getParentRoute: () => rootRoute, path: "/import", component: ImportPage }),
   createRoute({ getParentRoute: () => rootRoute, path: "/cleanup", component: CleanupPage }),
-  createRoute({ getParentRoute: () => rootRoute, path: "/settings", component: SettingsPage }),
+  createRoute({
+    getParentRoute: () => rootRoute,
+    path: "/settings",
+    component: SettingsPage,
+    validateSearch: (s: Record<string, unknown>): { tab?: "security" | "data" } => ({
+      tab: s.tab === "security" || s.tab === "data" ? s.tab : undefined,
+    }),
+  }),
   createRoute({ getParentRoute: () => rootRoute, path: "/workspaces", component: WorkspacesPage }),
   createRoute({ getParentRoute: () => rootRoute, path: "/operator", component: OperatorPage }),
   createRoute({
@@ -196,8 +227,8 @@ const routes = [
     component: WorkspaceActivityPage,
   }),
   // Sign-in and sign-up render from the gate; the paths only pick the tab.
-  createRoute({ getParentRoute: () => rootRoute, path: "/login", component: DashboardPage }),
-  createRoute({ getParentRoute: () => rootRoute, path: "/register", component: DashboardPage }),
+  createRoute({ getParentRoute: () => rootRoute, path: "/login", component: ToVault }),
+  createRoute({ getParentRoute: () => rootRoute, path: "/register", component: ToVault }),
 ];
 
 export const router = createRouter({
