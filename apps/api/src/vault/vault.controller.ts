@@ -1,7 +1,9 @@
 import type { VaultKeys } from "@minions/core";
 import {
+  BadRequestException,
   Body,
   Controller,
+  ForbiddenException,
   Get,
   HttpCode,
   Injectable,
@@ -11,14 +13,17 @@ import {
   UseGuards,
 } from "@nestjs/common";
 import { Throttle } from "@nestjs/throttler";
-import { ArrayMaxSize, IsArray, IsUUID } from "class-validator";
+import { Type } from "class-transformer";
+import { ArrayMaxSize, IsArray, IsUUID, ValidateNested } from "class-validator";
 import type { Response } from "express";
 import { ActivityService } from "../activity/activity.service";
-import { AuthKeyDto } from "../auth/auth.dto";
+import { AuthKeyDto, DeviceDto } from "../auth/auth.dto";
 import { AuthService } from "../auth/auth.service";
 import {
   Auth,
   type AuthContext,
+  Client,
+  type ClientInfo,
   SESSION_COOKIE,
   SESSION_COOKIE_OPTIONS,
 } from "../common/auth-context";
@@ -29,6 +34,10 @@ import { SessionsService } from "../sessions/sessions.service";
 class ExistingDto {
   @IsArray() @ArrayMaxSize(5000) @IsUUID(4, { each: true }) itemIds!: string[];
   @IsArray() @ArrayMaxSize(5000) @IsUUID(4, { each: true }) noteIds!: string[];
+}
+
+class ExtensionLinkDto {
+  @ValidateNested() @Type(() => DeviceDto) device!: DeviceDto;
 }
 
 @Injectable()
@@ -89,6 +98,35 @@ export class VaultService {
       data: { vaultUnlockedUntil: null },
     });
     await this.activity.log(ctx, "vault.locked");
+  }
+
+  /**
+   * "Sign in with the Minions app": the web app, already signed in (with its
+   * second factor) and unlocked, opens a session for the browser extension
+   * beside it. The extension gets its own revocable session on its own device;
+   * the vault key reaches it from the web app on this machine, never from here.
+   */
+  async linkExtension(ctx: AuthContext, device: DeviceDto, client: ClientInfo) {
+    // The web app's cookie session only: a bearer token (an extension's or the
+    // desktop app's) cannot mint more sessions for itself.
+    if (ctx.bearer) throw new ForbiddenException("Only the web app can connect the extension");
+    if (device.kind !== "extension") throw new BadRequestException("Not an extension");
+    const user = await this.prisma.user.findUniqueOrThrow({
+      where: { id: ctx.userId },
+      select: { autoLockMinutes: true },
+    });
+    const linked = await this.sessions.upsertDevice(ctx.userId, device, client);
+    const { token, id } = await this.sessions.create(
+      ctx.userId,
+      linked.id,
+      "ACTIVE",
+      client,
+      user.autoLockMinutes,
+    );
+    await this.activity.log(ctx, "device.linked", {
+      metadata: { deviceName: linked.name, sessionId: id },
+    });
+    return { token };
   }
 
   /** Revokes every session of the account, this one included. */
@@ -237,6 +275,18 @@ export class VaultController {
   @HttpCode(204)
   async lock(@Auth() auth: AuthContext) {
     await this.vault.lock(auth);
+  }
+
+  @UseGuards(VaultUnlockedGuard)
+  @Throttle({ default: { limit: 10, ttl: 60_000 } })
+  @Post("extension-link")
+  @HttpCode(200)
+  linkExtension(
+    @Auth() auth: AuthContext,
+    @Body() dto: ExtensionLinkDto,
+    @Client() client: ClientInfo,
+  ) {
+    return this.vault.linkExtension(auth, dto.device, client);
   }
 
   @Post("emergency-lock")

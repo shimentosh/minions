@@ -1,9 +1,14 @@
 /**
  * The extension's only privileged context.
  *
- * - Session token and vault key live in chrome.storage.session, which is held
- *   in memory, never written to disk, cleared when the browser closes, and
- *   (with TRUSTED_CONTEXTS) unreadable from content scripts.
+ * - The vault key lives in chrome.storage.session, which is held in memory,
+ *   never written to disk, cleared when the browser closes, and (with
+ *   TRUSTED_CONTEXTS) unreadable from content scripts. Only the session token
+ *   and account email persist (persist.ts), so the extension stays signed in
+ *   and a browser restart means unlocking, not signing in again.
+ * - "Sign in with Minions app": the web app, unlocked in this browser, hands
+ *   the extension a session of its own and the vault key through the content
+ *   script on the app's origin, so no password is typed here at all.
  * - The vault is never downloaded: only items matching the current site's
  *   host are listed, and a secret is decrypted only for the one fill or copy
  *   the user asked for.
@@ -23,6 +28,7 @@ import {
   generateTotp,
   getItemType,
   type ItemField,
+  type ItemTypeDef,
   importPrivateKey,
   keyAad,
   type MeResponse,
@@ -44,7 +50,9 @@ import {
   type WorkspaceItemDetail,
 } from "@minions/core";
 import {
+  type BridgeHello,
   type FillMessage,
+  type ItemView,
   isValidRequest,
   type ListedItem,
   type MatchResponse,
@@ -53,7 +61,9 @@ import {
   type Response,
   type StateResponse,
   type Status,
+  type TotpEntry,
 } from "./messages";
+import { persisted } from "./persist";
 
 declare const __API_URL__: string;
 declare const __WEB_URL__: string;
@@ -62,11 +72,15 @@ const LOCK_ALARM = "minions-autolock";
 const CLIPBOARD_ALARM = "minions-clipboard";
 /** A detected login waits this long for the user's answer, then is dropped. */
 const PENDING_TTL_MS = 5 * 60_000;
+/** How long a "Sign in with Minions app" request, and each link nonce, stays valid. */
+const CONNECT_TTL_MS = 10 * 60_000;
+const WEB_ORIGIN = new URL(__WEB_URL__).origin;
 const NEVER_SAVE_LIMIT = 500;
 
 interface SessionData {
   token?: string;
   email?: string;
+  name?: string;
   status?: Status;
   vaultKey?: string;
   /** Sharing private key (PKCS#8), for workspace credentials. Memory-only, like the vault key. */
@@ -78,6 +92,10 @@ interface SessionData {
   autoLockMinutes?: number;
   lastActivity?: number;
   pending?: PendingSave & { password: string; createdAt: number };
+  /** The user asked to sign in through the web app; it may ask them to approve until then. */
+  wantsConnectUntil?: number;
+  /** One-time nonces handed to the web app; a link must carry one. */
+  bridgeNonces?: { n: string; at: number }[];
 }
 
 void chrome.storage.session.setAccessLevel({ accessLevel: "TRUSTED_CONTEXTS" });
@@ -94,11 +112,43 @@ const session = {
   },
 };
 
+/**
+ * The session token, restored from disk after a browser restart. A restored
+ * session starts locked: the vault key never persists.
+ */
+async function currentToken(): Promise<string | undefined> {
+  const s = await session.get();
+  if (s.token || s.status === "two-factor") return s.token;
+  const saved = await persisted.get();
+  if (!saved) return undefined;
+  await session.set({
+    token: saved.token,
+    email: saved.email,
+    name: saved.name,
+    userId: saved.userId,
+    status: "locked",
+  });
+  return saved.token;
+}
+
+/** Remembers the signed-in account across restarts (never a key). */
+async function persistSignIn() {
+  const s = await session.get();
+  if (!s.token || !s.userId || !s.email) return;
+  await persisted.set({ token: s.token, email: s.email, userId: s.userId, name: s.name });
+}
+
 async function api<T>(
   path: string,
-  init: { method?: string; body?: unknown; query?: Record<string, string> } = {},
+  init: {
+    method?: string;
+    body?: unknown;
+    query?: Record<string, string>;
+    /** Another session's token (checking or ending one); its failures never sign this one out. */
+    token?: string;
+  } = {},
 ): Promise<T> {
-  const { token } = await session.get();
+  const token = init.token ?? (await currentToken());
   const url = new URL(path, __API_URL__);
   for (const [k, v] of Object.entries(init.query ?? {})) url.searchParams.set(k, v);
   const res = await fetch(url, {
@@ -117,11 +167,11 @@ async function api<T>(
     message?: string | string[];
     code?: string;
   } | null;
-  if (res.status === 401) {
+  if (res.status === 401 && !init.token) {
     await signOutLocally();
     throw new Error("Signed out. Sign in again.");
   }
-  if (data?.code === "VAULT_LOCKED") {
+  if (data?.code === "VAULT_LOCKED" && !init.token) {
     await lockLocally();
     throw new Error("Vault locked");
   }
@@ -171,16 +221,19 @@ async function openVault(stretchedKey: Uint8Array<ArrayBuffer>, keys: VaultKeys)
   userKey.fill(0);
   const me = await api<MeResponse>("/auth/me");
   await session.set({
-    ...(pk ? { privateKey: toBase64(pk), userId: keys.userId } : {}),
+    ...(pk ? { privateKey: toBase64(pk) } : {}),
+    userId: keys.userId,
     vaultKey: toBase64(vk),
     vaultId: keys.vaultId,
     status: "unlocked",
     autoLockMinutes: me.user.autoLockMinutes,
     email: me.user.email,
+    name: me.user.name,
     lastActivity: Date.now(),
   });
   vk.fill(0);
   pk?.fill(0);
+  await persistSignIn();
   await scheduleLock();
 }
 
@@ -193,6 +246,7 @@ async function lockLocally() {
 }
 
 async function signOutLocally() {
+  await persisted.clear();
   await chrome.storage.session.clear();
   await session.set({ status: "signed-out" });
   await chrome.alarms.clear(LOCK_ALARM);
@@ -218,9 +272,51 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
 });
 
 async function getStatus(): Promise<Status> {
+  const token = await currentToken();
   const s = await session.get();
-  if (!s.token) return s.status === "two-factor" ? "two-factor" : "signed-out";
+  if (!token) return s.status === "two-factor" ? "two-factor" : "signed-out";
   return s.status ?? "locked";
+}
+
+/** Ends another session (a replaced one, or one the web app minted that is not needed). */
+async function revokeToken(token: string) {
+  await api("/auth/logout", { method: "POST", token }).catch(() => undefined);
+}
+
+/** Ends a session the app offered and we are not taking, unless it is the one in use. */
+async function discardOffered(token: string) {
+  if ((await session.get()).token !== token) await revokeToken(token);
+}
+
+/** Tells an open popup to redraw; nothing is listening when it is closed. */
+function stateChanged() {
+  chrome.runtime.sendMessage({ type: "minions-state-changed" }).catch(() => undefined);
+}
+
+/** Open tabs of the Minions web app, the one in front first. */
+async function appTabs() {
+  const tabs = await chrome.tabs.query({ url: `${WEB_ORIGIN}/*` });
+  return tabs.sort((a, b) => Number(b.active) - Number(a.active));
+}
+
+/** Asks the app in a tab to say hello again (and so to connect, if it is unlocked). */
+async function pingApp(tabId: number) {
+  await chrome.tabs
+    .sendMessage(tabId, { type: "minions-bridge-hello" }, { frameId: 0 })
+    .catch(() => undefined);
+}
+
+interface TotpRow {
+  id: string;
+  name: string;
+  subtitle: string | null;
+  favorite: boolean;
+  protectedItemKey: string | null;
+  field: ItemField;
+}
+
+function fieldLabel(def: ItemTypeDef | undefined, f: ItemField) {
+  return f.label ?? def?.fields.find((d) => d.key === f.key)?.label ?? f.key;
 }
 
 /** An item with the key that opens its fields: the vault key, or a workspace item's own key. */
@@ -423,9 +519,18 @@ async function handle(req: Request, sender: chrome.runtime.MessageSender): Promi
   if (!isValidRequest(req)) throw new Error("Not allowed");
   const fromContent = !sender.url?.startsWith(chrome.runtime.getURL(""));
   if (fromContent) {
-    if (!["formSubmitted", "pendingSave", "resolveSave"].includes(req.type))
-      throw new Error("Not allowed");
     if (sender.frameId !== 0 || !sender.tab) throw new Error("Not allowed");
+    // The app bridge answers the Minions web app's own origin only, as the
+    // browser reports it: any other site asking gets nothing.
+    let origin: string | null = null;
+    try {
+      origin = new URL(sender.url ?? "").origin;
+    } catch {
+      /* not a page */
+    }
+    const allowed = ["formSubmitted", "pendingSave", "resolveSave"];
+    if (origin === WEB_ORIGIN) allowed.push("bridgeHello", "bridgeLink");
+    if (!allowed.includes(req.type)) throw new Error("Not allowed");
   } else await session.set({ lastActivity: Date.now() });
   // For content scripts: the page's host as the browser reports it, never as the page claims.
   const senderHost = fromContent ? normalizeHost(sender.url ?? null) : null;
@@ -433,9 +538,13 @@ async function handle(req: Request, sender: chrome.runtime.MessageSender): Promi
   switch (req.type) {
     case "state": {
       const s = await session.get();
+      const status = await getStatus();
+      const s2 = await session.get();
       return {
-        status: await getStatus(),
-        email: s.email ?? null,
+        status,
+        email: s2.email ?? s.email ?? null,
+        name: s2.name ?? null,
+        linked: status === "locked" || status === "unlocked",
         apiUrl: __API_URL__,
         webUrl: __WEB_URL__,
       } satisfies StateResponse;
@@ -450,7 +559,7 @@ async function handle(req: Request, sender: chrome.runtime.MessageSender): Promi
       const result = await api<AuthResult>("/auth/login", {
         body: { email: req.email, authKey, device: await deviceInfo() },
       });
-      await session.set({ token: result.token, email: req.email });
+      await session.set({ token: result.token, email: req.email, wantsConnectUntil: 0 });
       if (result.status === "two_factor_required") {
         // Held in memory-only session storage until the code is entered.
         await session.set({ status: "two-factor", stretchedKey: toBase64(stretchedKey) });
@@ -491,6 +600,19 @@ async function handle(req: Request, sender: chrome.runtime.MessageSender): Promi
       if (!host) return { host: null, items: [] } satisfies MatchResponse;
       await vaultKey();
       return { host, items: await matchAll(host) } satisfies MatchResponse;
+    }
+    case "browse": {
+      await vaultKey();
+      const page = await api<Page<VaultItemSummary>>("/vault/items", {
+        query:
+          req.view === "favorites"
+            ? { favorite: "true", sort: "name", limit: "20" }
+            : { sort: "recent", limit: "6" },
+      });
+      // "Recent" means used here before, not merely created.
+      return page.items.filter(
+        (i) => req.view === "favorites" || i.lastAccessedAt,
+      ) satisfies ListedItem[];
     }
     case "search": {
       await vaultKey();
@@ -551,8 +673,179 @@ async function handle(req: Request, sender: chrome.runtime.MessageSender): Promi
       const secret = await decryptField(opened, "totp");
       opened.key.fill(0);
       if (!secret) throw new Error("No 2FA secret on this item");
-      await recordUsage(opened, "item.totp_generated");
+      if (!req.quiet) await recordUsage(opened, "item.totp_generated");
       return generateTotp(secret);
+    }
+    case "totpList": {
+      // Every personal 2FA code, live. Secrets are decrypted here, turned into
+      // codes and dropped: only the codes go to the popup.
+      const rows = await api<TotpRow[]>("/vault/items/totp");
+      const vk = await vaultKey();
+      const vaultId = (await session.get()).vaultId ?? (await api<MeResponse>("/auth/me")).vaultId;
+      const now = Date.now();
+      try {
+        return await Promise.all(
+          rows.map(async (r): Promise<TotpEntry> => {
+            const base = { id: r.id, name: r.name, subtitle: r.subtitle, favorite: r.favorite };
+            let key = vk;
+            try {
+              if (r.protectedItemKey)
+                key = await unwrapKey(
+                  vk,
+                  r.protectedItemKey,
+                  keyAad.itemKeyForVault(vaultId, r.id),
+                );
+              const secret = r.field.sensitive
+                ? await decryptString(key, r.field.value, aad.field(r.id, "totp"))
+                : r.field.value;
+              const cur = await generateTotp(secret, now);
+              const next = await generateTotp(secret, now + cur.period * 1000);
+              return {
+                ...base,
+                code: cur.code,
+                next: next.code,
+                remaining: cur.remaining,
+                period: cur.period,
+              };
+            } catch {
+              return { ...base, code: null, next: null, remaining: 30, period: 30 };
+            } finally {
+              if (key !== vk) key.fill(0);
+            }
+          }),
+        );
+      } finally {
+        vk.fill(0);
+      }
+    }
+    case "item": {
+      const opened = await openItem(req.itemId, req.workspaceId, req.shared);
+      const { item } = opened;
+      opened.key.fill(0);
+      const def = getItemType(item.type);
+      const url = item.fields.find((f) => f.key === "url" && !f.sensitive)?.value ?? null;
+      let fillable = false;
+      if (req.tabId !== undefined && item.fields.some((f) => f.key === "password")) {
+        const tab = await chrome.tabs.get(req.tabId).catch(() => null);
+        fillable = !!tab?.url && canFill(url, item.host, tab.url);
+      }
+      return {
+        id: item.id,
+        name: item.name,
+        type: item.type,
+        typeLabel: def?.label ?? item.type,
+        host: item.host,
+        url,
+        favorite: item.favorite,
+        hasTotp: item.fields.some((f) => f.key === "totp"),
+        canFill: fillable,
+        ...(opened.workspaceId ? { workspaceId: opened.workspaceId } : {}),
+        ...(opened.shared ? { shared: true } : {}),
+        fields: item.fields
+          .filter((f) => f.key !== "totp")
+          .map((f) => ({
+            key: f.key,
+            label: fieldLabel(def, f),
+            sensitive: f.sensitive,
+            kind: f.kind ?? def?.fields.find((d) => d.key === f.key)?.kind ?? "text",
+            value: f.sensitive ? null : f.value,
+          })),
+      } satisfies ItemView;
+    }
+    case "reveal": {
+      const opened = await openItem(req.itemId, req.workspaceId, req.shared);
+      const value = await decryptField(opened, req.field);
+      opened.key.fill(0);
+      if (value === null) throw new Error("Field not found");
+      await recordUsage(opened, "item.revealed", req.field);
+      return value;
+    }
+    case "connect": {
+      if (req.silent) {
+        // The popup opened locked: an app tab that is unlocked reconnects us.
+        for (const t of await appTabs()) if (t.id !== undefined) await pingApp(t.id);
+        return null;
+      }
+      // Bring up the web app. If it is unlocked it connects this extension:
+      // on its own when already linked to this account, else after Connect.
+      await session.set({ wantsConnectUntil: Date.now() + CONNECT_TTL_MS });
+      const [tab] = await appTabs();
+      if (tab?.id !== undefined) {
+        await chrome.tabs.update(tab.id, { active: true });
+        if (tab.windowId !== undefined)
+          await chrome.windows.update(tab.windowId, { focused: true });
+        await pingApp(tab.id);
+      } else await chrome.tabs.create({ url: __WEB_URL__ });
+      return null;
+    }
+    case "bridgeHello": {
+      const s = await session.get();
+      const now = Date.now();
+      const nonce = crypto.randomUUID();
+      const nonces = (s.bridgeNonces ?? []).filter((x) => now - x.at < CONNECT_TTL_MS).slice(-4);
+      await session.set({ bridgeNonces: [...nonces, { n: nonce, at: now }] });
+      const saved = await persisted.get();
+      const { clientDeviceId, name } = await deviceInfo();
+      return {
+        nonce,
+        status: await getStatus(),
+        linkedUserId: saved?.userId ?? null,
+        wantsConnect: (s.wantsConnectUntil ?? 0) > now,
+        device: { clientDeviceId, name },
+      } satisfies BridgeHello;
+    }
+    case "bridgeLink": {
+      const s = await session.get();
+      const now = Date.now();
+      const nonces = s.bridgeNonces ?? [];
+      const hit = nonces.find((x) => x.n === req.nonce && now - x.at < CONNECT_TTL_MS);
+      if (!hit) {
+        await discardOffered(req.token);
+        throw new Error("This connection request expired. Try again.");
+      }
+      await session.set({ bridgeNonces: nonces.filter((x) => x !== hit) });
+      const saved = await persisted.get();
+      if ((await getStatus()) === "unlocked" && saved?.userId === req.userId) {
+        // Another app tab got there first: this extra session is not needed.
+        await discardOffered(req.token);
+        return "already";
+      }
+      // The session must be real, unlocked, and the account the keys claim to be for.
+      const me = await api<MeResponse>("/auth/me", { token: req.token }).catch(() => null);
+      const vk = fromBase64(req.vaultKey);
+      if (
+        !me ||
+        me.user.id !== req.userId ||
+        me.vaultId !== req.vaultId ||
+        !me.session.vaultUnlocked ||
+        vk.length !== 32
+      ) {
+        vk.fill(0);
+        await discardOffered(req.token);
+        throw new Error("The connection could not be verified");
+      }
+      vk.fill(0);
+      // Replaces whatever was here: this account's old session, or another account.
+      const old = s.token ?? saved?.token;
+      if (old && old !== req.token) await revokeToken(old);
+      await chrome.storage.session.clear();
+      await chrome.action.setBadgeText({ text: "" });
+      await session.set({
+        token: req.token,
+        email: me.user.email,
+        name: me.user.name,
+        userId: me.user.id,
+        vaultId: me.vaultId,
+        vaultKey: req.vaultKey,
+        ...(req.privateKey ? { privateKey: req.privateKey } : {}),
+        status: "unlocked",
+        autoLockMinutes: me.user.autoLockMinutes,
+        lastActivity: now,
+      });
+      await persistSignIn();
+      await scheduleLock();
+      stateChanged();
+      return "linked";
     }
     case "generate":
       return generatePassword(req.options);

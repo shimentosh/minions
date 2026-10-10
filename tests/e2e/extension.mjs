@@ -29,9 +29,9 @@ const site = createServer((req, res) => {
 // Register through the real web client code path is covered by smoke.mjs;
 // here the extension signs in to an account created in the web app's way.
 const core = await import("../../packages/core/dist/index.js");
+const userId = crypto.randomUUID();
+const vaultId = crypto.randomUUID();
 {
-  const userId = crypto.randomUUID();
-  const vaultId = crypto.randomUUID();
   const keys = await core.createAccountKeys(password, userId, vaultId, {
     ...core.DEFAULT_KDF,
     memory: 19456,
@@ -96,10 +96,15 @@ try {
   const first = await msg({ type: "state" });
   if (!first?.ok) console.log("state response:", JSON.stringify(first));
   check(first?.data?.status === "signed-out", "starts signed out");
+  check(
+    await popup.getByRole("button", { name: "Sign in with Minions app" }).isVisible(),
+    "offers to sign in through the Minions app first",
+  );
+  await popup.getByRole("button", { name: "Use email and master password" }).click();
   await popup.getByPlaceholder("you@example.com").fill(email);
   await popup.locator('input[type="password"]').fill(password);
-  await popup.getByRole("button", { name: "Sign in" }).click();
-  await popup.getByPlaceholder("Search vault…").waitFor({ timeout: 30_000 });
+  await popup.getByRole("button", { name: "Sign in", exact: true }).click();
+  await popup.getByPlaceholder("Search your vault…").waitFor({ timeout: 30_000 });
   check((await msg({ type: "state" })).data.status === "unlocked", "signs in and unlocks");
 
   // Key material is in memory-only session storage, never in local storage.
@@ -224,6 +229,130 @@ try {
   check((await msg({ type: "state" })).data.status === "locked", "locks independently");
   const afterLock = await msg({ type: "match", tabId });
   check(afterLock.ok === false, "nothing is readable while locked");
+
+  // ─── Stays signed in ───────────────────────────────────────────────────────
+  // A browser restart empties session storage; the sign-in itself persists.
+  await popup.evaluate(() => chrome.storage.session.clear());
+  const restarted = (await msg({ type: "state" })).data;
+  check(
+    restarted.status === "locked" && restarted.email === email,
+    "after a restart it is still signed in, and locked",
+  );
+
+  // ─── Sign in with the Minions app ──────────────────────────────────────────
+  // Any other site talking the bridge protocol gets no answer.
+  const helloFrom = (p) =>
+    p.evaluate(
+      () =>
+        new Promise((done) => {
+          const on = (e) => {
+            if (e.data?.source === "minions-extension" && e.data.type === "hello") {
+              window.removeEventListener("message", on);
+              done(e.data);
+            }
+          };
+          window.addEventListener("message", on);
+          window.postMessage({ source: "minions-app", type: "ping" }, location.origin);
+          setTimeout(() => done(null), 1500);
+        }),
+    );
+  check((await helloFrom(site2)) === null, "the app bridge does not answer other sites");
+
+  const WEB = restarted.webUrl;
+  const webUp = await fetch(WEB)
+    .then((r) => r.ok)
+    .catch(() => false);
+  if (!webUp) console.log(`- skipped app-bridge checks: no web app at ${WEB}`);
+  else {
+    const appPage = await ctx.newPage();
+    await appPage.goto(WEB);
+    const hello = await helloFrom(appPage);
+    check(
+      hello?.status === "locked" &&
+        hello?.linkedUserId === userId &&
+        !!hello?.device?.clientDeviceId,
+      "the app sees the extension: locked, signed in to this account",
+    );
+
+    // The web app's side, done here directly: a web session opens one for the extension.
+    const pre = await (
+      await fetch(`${API}/auth/prelogin`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-minions-client": "web" },
+        body: JSON.stringify({ email }),
+      })
+    ).json();
+    const { authKey, stretchedKey } = await core.deriveMasterKeys(password, pre.kdf);
+    const loginRes = await fetch(`${API}/auth/login`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-minions-client": "web" },
+      body: JSON.stringify({
+        email,
+        authKey,
+        device: { clientDeviceId: crypto.randomUUID(), name: "e2e web", kind: "web" },
+      }),
+    });
+    const cookie = loginRes.headers.get("set-cookie").split(";")[0];
+    const { keys } = await loginRes.json();
+    const userKey = await core.unwrapKey(
+      stretchedKey,
+      keys.protectedUserKey,
+      core.aad.userKey(userId),
+    );
+    const vk = await core.unwrapKey(userKey, keys.protectedVaultKey, core.aad.vaultKey(vaultId));
+    const linkRes = await fetch(`${API}/vault/extension-link`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-minions-client": "web", cookie },
+      body: JSON.stringify({ device: { ...hello.device, kind: "extension" } }),
+    });
+    const { token } = await linkRes.json();
+    const link = {
+      source: "minions-app",
+      type: "link",
+      nonce: hello.nonce,
+      token,
+      userId,
+      vaultId,
+      email,
+      autoLockMinutes: 15,
+      vaultKey: core.toBase64(vk),
+      privateKey: null,
+    };
+    const postLink = (data) =>
+      appPage.evaluate(
+        (d) =>
+          new Promise((done) => {
+            const on = (e) => {
+              if (e.data?.source === "minions-extension" && e.data.type === "linked") {
+                window.removeEventListener("message", on);
+                done(e.data);
+              }
+            };
+            window.addEventListener("message", on);
+            window.postMessage(d, location.origin);
+            setTimeout(() => done(null), 10_000);
+          }),
+        data,
+      );
+    const linked = await postLink(link);
+    check(linked?.ok === true, "the app connects the extension without a password");
+    check((await msg({ type: "state" })).data.status === "unlocked", "connected and unlocked");
+    check(
+      (await msg({ type: "match", tabId })).data?.items.length === 1,
+      "reads the vault after connecting",
+    );
+    const totps = await msg({ type: "totpList" });
+    check(totps.ok && Array.isArray(totps.data), "lists 2FA codes");
+
+    // A nonce works once: a replayed link is refused and leaves the session alone.
+    const replay = await postLink(link);
+    check(replay?.ok === false, "a replayed link is refused");
+    check(
+      (await msg({ type: "state" })).data.status === "unlocked",
+      "a refused link changes nothing",
+    );
+    await appPage.close();
+  }
 } finally {
   await ctx.close();
   site.close();

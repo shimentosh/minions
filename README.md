@@ -73,8 +73,10 @@ and organizes it the way you work: by project, by collection and by tag.
 
 ### Apps and import
 - **Web app** for desktop and mobile browsers, with light and dark themes.
-- **Chrome extension** (Manifest V3): fills logins on matching sites, offers to save new
-  logins, and includes 2FA codes and a password generator. Site matching is phishing-resistant.
+- **Chrome extension** (Manifest V3): "Sign in with Minions app" connects it to the web app
+  with one click, with no password to type, and it stays signed in. It fills logins on matching
+  sites, offers to save new logins, shows every 2FA code live, and includes item details,
+  favorites and a password generator. Site matching is phishing-resistant.
 - **Desktop app** (Tauri 2) with a Windows installer.
 - **Import** from Bitwarden (CSV/JSON), Chrome, Edge, Firefox, Notion (CSV export) and
   generic CSV/JSON, with a preview and duplicate detection.
@@ -158,9 +160,10 @@ MINIONS_EMAIL=you@example.com MINIONS_PASSWORD='your master password' pnpm seed:
   In production, set `RESEND_API_KEY` and `MAIL_FROM` to send through
   [Resend](https://resend.com).
 - **AI suggestions:** set `DEEPSEEK_API_KEY`. Without it, rules and your own habits are used.
-- **Chrome extension:** `pnpm --filter @minions/extension build`, then chrome://extensions →
-  Developer mode → Load unpacked → `apps/extension/dist`. Use `MINIONS_API_URL` /
-  `MINIONS_WEB_URL` at build time to point it at your server.
+- **Chrome extension:** `MINIONS_WEB_URL=https://vault.example.com pnpm --filter @minions/extension build`,
+  then chrome://extensions → Developer mode → Load unpacked → `apps/extension/dist`. The API is
+  taken to be at `<web>/api` (as the production image serves it); set `MINIONS_API_URL` if not.
+  Without `MINIONS_WEB_URL` it builds for the local dev servers.
 - **Desktop:** `pnpm --filter @minions/desktop dev` runs the web app inside a Tauri window.
   For a different API origin, update `connect-src` in `apps/desktop/src-tauri/tauri.conf.json`.
 

@@ -4,7 +4,19 @@
  * and reports a login form submission so the background can ask whether to
  * save it. Nothing is saved without the user pressing Save.
  */
-import type { FillMessage, PendingSave, Request, Response, SaveAction } from "./messages";
+import type {
+  BridgeHello,
+  FillMessage,
+  PendingSave,
+  Request,
+  Response,
+  SaveAction,
+} from "./messages";
+
+declare const __WEB_URL__: string;
+
+/** This page is the Minions web app itself (top frame): bridge to it, never offer to save its login. */
+const ON_APP = window.top === window && location.origin === new URL(__WEB_URL__).origin;
 
 function send<T>(req: Request): Promise<T | null> {
   return chrome.runtime
@@ -47,25 +59,34 @@ function setValue(input: HTMLInputElement, value: string) {
   input.dispatchEvent(new Event("change", { bubbles: true }));
 }
 
-chrome.runtime.onMessage.addListener((msg: FillMessage, sender, sendResponse) => {
-  // Only the extension itself may ask for a fill, and only into the top frame.
-  if (sender.id !== chrome.runtime.id || msg?.type !== "minions-fill") return;
-  // The background checked the tab's address before decrypting; if the page
-  // navigated since, it is a different origin now and gets nothing.
-  if (window.top !== window || location.origin !== msg.origin) {
-    sendResponse({ filled: false });
-    return;
-  }
-  const { username, password } = findFields();
-  if (username && msg.username) setValue(username, msg.username);
-  if (password && msg.password) setValue(password, msg.password);
-  sendResponse({ filled: !!(username || password) });
-});
+chrome.runtime.onMessage.addListener(
+  (msg: FillMessage | { type: "minions-bridge-hello" }, sender, sendResponse) => {
+    if (sender.id !== chrome.runtime.id) return;
+    if (msg?.type === "minions-bridge-hello") {
+      if (ON_APP) void hello();
+      return;
+    }
+    // Only the extension itself may ask for a fill, and only into the top frame.
+    if (msg?.type !== "minions-fill") return;
+    // The background checked the tab's address before decrypting; if the page
+    // navigated since, it is a different origin now and gets nothing.
+    if (window.top !== window || location.origin !== msg.origin) {
+      sendResponse({ filled: false });
+      return;
+    }
+    const { username, password } = findFields();
+    if (username && msg.username) setValue(username, msg.username);
+    if (password && msg.password) setValue(password, msg.password);
+    sendResponse({ filled: !!(username || password) });
+  },
+);
 
 // ─── Ask before saving a login the user just submitted ───────────────────────
 
 let lastReported = "";
 function report() {
+  // The master password typed into Minions itself is never a login to save.
+  if (ON_APP) return;
   const { username, password } = findFields();
   if (!password?.value) return;
   // Remember only that this pair was reported, not the password itself.
@@ -107,6 +128,7 @@ document.addEventListener(
 );
 
 async function showPrompt() {
+  if (ON_APP) return;
   const pending = await send<PendingSave>({ type: "pendingSave" });
   if (!pending || document.getElementById("minions-save-prompt")) return;
   const host = document.createElement("div");
@@ -155,3 +177,50 @@ async function showPrompt() {
 
 // A full-page navigation after login lands here: show any pending prompt.
 void showPrompt();
+
+// ─── Bridge to the Minions web app ───────────────────────────────────────────
+// On the app's own origin only. The app hands over a session and the vault
+// key here; the background checks the sender's address itself and accepts a
+// link only with a nonce it gave out in a hello.
+
+const FROM_APP = "minions-app";
+const FROM_EXTENSION = "minions-extension";
+
+function toApp(data: Record<string, unknown>) {
+  window.postMessage({ source: FROM_EXTENSION, ...data }, location.origin);
+}
+
+async function hello() {
+  const h = await send<BridgeHello>({ type: "bridgeHello" });
+  if (h) toApp({ type: "hello", ...h });
+}
+
+if (ON_APP) {
+  window.addEventListener("message", (e: MessageEvent) => {
+    if (e.source !== window || e.origin !== location.origin) return;
+    const d = e.data as Record<string, unknown> | null;
+    if (!d || typeof d !== "object" || d.source !== FROM_APP) return;
+    if (d.type === "ping") void hello();
+    else if (d.type === "link") {
+      const req = {
+        type: "bridgeLink",
+        nonce: d.nonce,
+        token: d.token,
+        userId: d.userId,
+        vaultId: d.vaultId,
+        email: d.email,
+        autoLockMinutes: d.autoLockMinutes,
+        vaultKey: d.vaultKey,
+        privateKey: d.privateKey ?? null,
+      } as Request;
+      chrome.runtime
+        .sendMessage(req)
+        .then((r: Response | undefined) =>
+          toApp({ type: "linked", ok: !!r?.ok, ...(r && !r.ok ? { error: r.error } : {}) }),
+        )
+        .catch(() => toApp({ type: "linked", ok: false, error: "The extension did not answer" }))
+        .finally(() => void hello());
+    }
+  });
+  void hello();
+}

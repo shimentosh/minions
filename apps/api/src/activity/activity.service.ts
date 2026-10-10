@@ -29,6 +29,7 @@ export const ACTIONS = [
   "auth.login_failed",
   "auth.registered",
   "device.added",
+  "device.linked",
   "device.revoked",
   "session.revoked",
   "session.revoked_all",
