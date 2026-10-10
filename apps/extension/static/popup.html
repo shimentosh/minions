@@ -7,12 +7,18 @@
   </head>
   <body>
     <header>
-      <img src="icon.png" alt="" width="22" height="22" />
-      <strong>Minions</strong>
-      <span id="host" class="muted"></span>
-      <button id="lock" type="button" class="icon" title="Lock" hidden>🔒</button>
+      <img src="icon.png" alt="" width="24" height="24" />
+      <div class="brand">
+        <strong>Minions</strong>
+        <span id="host"></span>
+      </div>
+      <button id="open-app" type="button" class="icon" title="Open Minions"></button>
+      <button id="lock" type="button" class="icon" title="Lock" hidden></button>
     </header>
+    <nav id="tabs" hidden></nav>
     <main id="app"></main>
+    <footer id="footer" hidden></footer>
+    <div id="toast" role="status" aria-live="polite"></div>
     <script type="module" src="popup.js"></script>
   </body>
 </html>

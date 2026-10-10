@@ -15,7 +15,7 @@ const FILTERS: Record<string, string | undefined> = {
   changes:
     "item.created,item.updated,item.deleted,item.restored,item.purged,item.merged,note.created,note.updated,note.deleted,import.completed",
   access:
-    "auth.login,auth.logout,auth.login_failed,vault.locked,vault.unlocked,vault.unlock_failed,device.added,device.revoked,session.revoked,session.revoked_all,vault.exported",
+    "auth.login,auth.logout,auth.login_failed,vault.locked,vault.unlocked,vault.unlock_failed,device.added,device.linked,device.revoked,session.revoked,session.revoked_all,vault.exported",
 };
 
 export function ActivityPage() {

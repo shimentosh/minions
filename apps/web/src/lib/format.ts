@@ -56,6 +56,7 @@ export const ACTION_LABELS: Record<string, string> = {
   "auth.login_failed": "Failed sign-in",
   "auth.registered": "Account created",
   "device.added": "Device added",
+  "device.linked": "Extension connected",
   "device.revoked": "Device revoked",
   "session.revoked": "Session revoked",
   "session.revoked_all": "Sessions revoked",

@@ -1,13 +1,21 @@
 {
   "manifest_version": 3,
   "name": "Minions",
-  "description": "Fill and save logins from your Minions vault. End-to-end encrypted.",
-  "version": "0.1.0",
-  "icons": { "128": "icon.png" },
-  "action": { "default_popup": "popup.html", "default_title": "Minions" },
-  "background": { "service_worker": "background.js", "type": "module" },
+  "description": "Fill and save logins, see live 2FA codes and generate passwords from your Minions vault. End-to-end encrypted.",
+  "version": "0.2.0",
+  "icons": {
+    "128": "icon.png"
+  },
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Minions"
+  },
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
   "minimum_chrome_version": "120",
-  "permissions": ["storage", "activeTab", "alarms", "offscreen", "clipboardWrite"],
+  "permissions": ["storage", "activeTab", "alarms", "offscreen", "clipboardWrite", "favicon"],
   "host_permissions": [],
   "content_scripts": [
     {
@@ -21,6 +29,11 @@
     "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'none'; base-uri 'none'"
   },
   "commands": {
-    "_execute_action": { "suggested_key": { "default": "Ctrl+Shift+L", "mac": "Command+Shift+L" } }
+    "_execute_action": {
+      "suggested_key": {
+        "default": "Ctrl+Shift+L",
+        "mac": "Command+Shift+L"
+      }
+    }
   }
 }

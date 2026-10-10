@@ -1,10 +1,11 @@
 {
   "name": "@minions/extension",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
   "scripts": {
     "build": "node scripts/build.mjs",
+    "build:prod": "MINIONS_WEB_URL=https://minion.sentosh.com node scripts/build.mjs",
     "dev": "node scripts/build.mjs --watch",
     "typecheck": "tsc --noEmit -p tsconfig.json"
   },

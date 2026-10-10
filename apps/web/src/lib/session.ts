@@ -2,14 +2,18 @@ import {
   type AuthResult,
   aad,
   createAccountKeys,
+  decryptBytes,
   deriveMasterKeys,
+  encryptBytes,
   generateKey,
   generateUserKeyPair,
   importPrivateKey,
   type MeResponse,
   openPrivateKey,
   protectPrivateKey,
+  toBase64,
   unwrapKey,
+  unwrapPrivateKeyBytes,
   type VaultKeys,
   wipe,
   wrapKey,
@@ -54,6 +58,44 @@ export function requireSharingKeys() {
   return sharing;
 }
 
+/**
+ * The private key's PKCS#8 bytes, wrapped by the vault key, kept only so the
+ * browser extension can be connected without the master password. It is no
+ * more exposed than the vault key it sits beside, and goes with it on lock.
+ */
+let extensionPrivateKey: { userId: string; envelope: string } | null = null;
+const handoffAad = (userId: string) => `extension-handoff:${userId}`;
+
+async function keepForExtension(pkcs8: Uint8Array<ArrayBuffer>, userId: string) {
+  extensionPrivateKey = vaultKey
+    ? { userId, envelope: await encryptBytes(vaultKey, pkcs8, handoffAad(userId)) }
+    : null;
+}
+
+/**
+ * What the extension needs to open the same vault: raw key bytes, base64.
+ * Only the extension bridge calls this, and only for this browser's extension.
+ */
+export async function keysForExtension(): Promise<{
+  vaultKey: string;
+  privateKey: string | null;
+}> {
+  const vk = requireVaultKey();
+  let privateKey: string | null = null;
+  if (extensionPrivateKey) {
+    const pkcs8 = await decryptBytes(
+      vk,
+      extensionPrivateKey.envelope,
+      handoffAad(extensionPrivateKey.userId),
+    ).catch(() => null);
+    if (pkcs8) {
+      privateKey = toBase64(pkcs8);
+      pkcs8.fill(0);
+    }
+  }
+  return { vaultKey: toBase64(vk), privateKey };
+}
+
 const closeListeners = new Set<() => void>();
 /** Lets key caches elsewhere (workspace keys, item keys) empty themselves on lock. */
 export function onVaultClosed(listener: () => void) {
@@ -68,6 +110,7 @@ export function onVaultClosed(listener: () => void) {
  */
 async function openSharing(userKey: Uint8Array<ArrayBuffer>, keys: VaultKeys) {
   sharing = null;
+  extensionPrivateKey = null;
   try {
     if (keys.publicKey && keys.protectedPrivateKey) {
       sharing = {
@@ -75,6 +118,12 @@ async function openSharing(userKey: Uint8Array<ArrayBuffer>, keys: VaultKeys) {
         publicKey: keys.publicKey,
         privateKey: await openPrivateKey(userKey, keys.protectedPrivateKey, keys.userId),
       };
+      const pkcs8 = await unwrapPrivateKeyBytes(userKey, keys.protectedPrivateKey, keys.userId);
+      try {
+        await keepForExtension(pkcs8, keys.userId);
+      } finally {
+        wipe(pkcs8);
+      }
       return;
     }
     const pair = await generateUserKeyPair();
@@ -88,11 +137,13 @@ async function openSharing(userKey: Uint8Array<ArrayBuffer>, keys: VaultKeys) {
         publicKey: pair.publicKey,
         privateKey: await importPrivateKey(pair.privateKey),
       };
+      await keepForExtension(pair.privateKey, keys.userId);
     } finally {
       wipe(pair.privateKey);
     }
   } catch {
     sharing = null;
+    extensionPrivateKey = null;
   }
 }
 
@@ -188,6 +239,15 @@ export async function rotateVaultKey(
     wipe(userKey);
     wipe(stretchedKey);
   }
+  // The extension's copy of the private key was wrapped by the old vault key.
+  if (extensionPrivateKey) {
+    const { userId, envelope } = extensionPrivateKey;
+    const pkcs8 = await decryptBytes(current, envelope, handoffAad(userId)).catch(() => null);
+    extensionPrivateKey = pkcs8
+      ? { userId, envelope: await encryptBytes(fresh, pkcs8, handoffAad(userId)) }
+      : null;
+    pkcs8?.fill(0);
+  }
   wipe(vaultKey);
   vaultKey = fresh;
   // Cached ciphertext is under the old key.
@@ -198,6 +258,7 @@ function closeVault() {
   wipe(vaultKey);
   vaultKey = null;
   sharing = null;
+  extensionPrivateKey = null;
   for (const l of closeListeners) l();
   wipe(pendingStretchedKey);
   pendingStretchedKey = null;

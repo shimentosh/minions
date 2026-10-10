@@ -10,6 +10,7 @@ import { useEffect } from "react";
 import { LockScreen, SignInScreen, Splash } from "@/components/auth/auth-screens";
 import { CommandPalette } from "@/components/command-palette";
 import { AppSidebar } from "@/components/layout/app-sidebar";
+import { ExtensionConnectDialog } from "@/components/layout/extension-connect-dialog";
 import { VerifyEmailBanner } from "@/components/layout/verify-email-banner";
 import { QuickCaptureDialog } from "@/components/quick-capture";
 import { SidebarInset, SidebarProvider } from "@/components/ui/sidebar";
@@ -76,6 +77,7 @@ function AppShell() {
         <CommandPalette />
         <QuickCaptureDialog />
         <ItemEditorDialog />
+        <ExtensionConnectDialog />
       </SidebarProvider>
     </div>
   );
