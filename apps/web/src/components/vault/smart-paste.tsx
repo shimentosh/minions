@@ -61,68 +61,68 @@ export function SmartPaste({
   }
 
   return (
-    <div className="space-y-1.5 rounded-xl border border-primary/25 border-dashed bg-primary/[0.03] p-3">
-      <div className="flex items-center gap-2 font-medium text-sm">
-        <span className="flex size-6 items-center justify-center rounded-md bg-primary/10">
-          <Sparkles className="size-3.5" />
-        </span>
-        Paste anything
-        <span className="font-normal text-muted-foreground text-xs">
-          website, email, password, 2FA QR screenshot…
-        </span>
-      </div>
-      <div className="flex gap-1.5">
-        <textarea
-          value={text}
-          onChange={(e) => setText(e.target.value)}
-          onPaste={(e) => {
-            const image = [...e.clipboardData.items]
-              .find((i) => i.type.startsWith("image/"))
-              ?.getAsFile();
-            if (image) {
-              e.preventDefault();
-              void fromImage(image);
-              return;
-            }
-            const pasted = e.clipboardData.getData("text");
-            if (pasted) {
-              e.preventDefault();
-              apply(pasted);
-            }
-          }}
-          rows={2}
-          spellCheck={false}
-          placeholder={"github.com  me@gmail.com  myPassw0rd!\nUser: octo   Pass: …   2FA: JBSW…"}
-          className="min-h-14 flex-1 resize-none rounded-lg border border-input bg-background px-3 py-2 font-mono text-[13px] outline-none placeholder:text-muted-foreground/60 focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/24"
-        />
-        <div className="flex flex-col gap-1">
+    <div className="space-y-1">
+      <div className="flex items-center gap-1.5">
+        <div className="relative min-w-0 flex-1">
+          <Sparkles className="pointer-events-none absolute start-2.5 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" />
+          <textarea
+            value={text}
+            onChange={(e) => setText(e.target.value)}
+            onPaste={(e) => {
+              const image = [...e.clipboardData.items]
+                .find((i) => i.type.startsWith("image/"))
+                ?.getAsFile();
+              if (image) {
+                e.preventDefault();
+                void fromImage(image);
+                return;
+              }
+              const pasted = e.clipboardData.getData("text");
+              if (pasted) {
+                e.preventDefault();
+                apply(pasted);
+              }
+            }}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && !e.shiftKey) {
+                e.preventDefault();
+                apply(text);
+              }
+            }}
+            rows={1}
+            spellCheck={false}
+            aria-label="Paste anything"
+            placeholder="Paste anything: website, email, password, 2FA QR…"
+            className="h-9 w-full resize-none rounded-lg border border-input border-dashed bg-background py-2 ps-8 pe-3 text-sm leading-5 outline-none placeholder:text-muted-foreground/70 focus-visible:border-ring focus-visible:border-solid focus-visible:ring-[3px] focus-visible:ring-ring/24"
+          />
+        </div>
+        {text.trim() && (
           <Button
-            size="icon-sm"
+            size="icon"
             variant="outline"
             onClick={() => apply(text)}
-            disabled={!text.trim()}
             aria-label="Fill fields"
             title="Fill fields"
           >
             <ClipboardPaste />
           </Button>
-          <Button
-            size="icon-sm"
-            variant="outline"
-            onClick={() => fileRef.current?.click()}
-            aria-label="Scan a QR code image"
-            title="Scan a QR code image"
-          >
-            <ImageUp />
-          </Button>
-          <input
-            ref={fileRef}
-            type="file"
-            accept="image/*"
-            className="hidden"
-            onChange={(e) => e.target.files?.[0] && void fromImage(e.target.files[0])}
-          />
-        </div>
+        )}
+        <Button
+          size="icon"
+          variant="outline"
+          onClick={() => fileRef.current?.click()}
+          aria-label="Scan a QR code image"
+          title="Scan a QR code image"
+        >
+          <ImageUp />
+        </Button>
+        <input
+          ref={fileRef}
+          type="file"
+          accept="image/*"
+          className="hidden"
+          onChange={(e) => e.target.files?.[0] && void fromImage(e.target.files[0])}
+        />
       </div>
       {filled.length > 0 && (
         <p className="text-emerald-700 text-xs dark:text-emerald-400">

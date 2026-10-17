@@ -36,7 +36,7 @@ try {
     (t) => navigator.clipboard.writeText(t),
     "Website: staging.example.com\nUser: team@example.com\nPass: Sh4red-Staging-Pass!\n2FA: JBSWY3DPEHPK3PXP",
   );
-  await d.getByPlaceholder(/github\.com {2}me@gmail\.com/).click();
+  await d.getByLabel("Paste anything").click();
   await owner.keyboard.press("Control+V");
   await d.locator("#item-name").fill("Staging admin");
   await d.getByRole("button", { name: "Save", exact: true }).click();

@@ -38,9 +38,10 @@ try {
   step("create a login and a note");
   await nav("/vault");
   await page.getByRole("button", { name: "New item" }).first().click();
-  await page.getByRole("button", { name: "Login" }).click();
+  // New items open as a login.
   await page.getByLabel("Name", { exact: true }).fill("GitHub");
   await page.getByLabel("Website", { exact: true }).fill("https://github.com/login");
+  await page.getByRole("button", { name: "Username" }).click();
   await page.getByLabel("Username", { exact: true }).fill("octocat");
   await page.locator("#f-password").fill("rotate-me-Secret-77");
   await page.getByRole("button", { name: "Save", exact: true }).click();

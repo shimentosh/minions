@@ -42,7 +42,7 @@ const dialog = () => page.getByRole("dialog");
 const pasteInto = async (text) => {
   await page.evaluate((t) => navigator.clipboard.writeText(t), text);
   await dialog()
-    .getByPlaceholder(/github\.com {2}me@gmail\.com/)
+    .getByLabel("Paste anything")
     .click();
   await page.keyboard.press("Control+V");
   await page.waitForTimeout(200);
@@ -82,7 +82,8 @@ try {
 
   // ── Domains: suggestions, linked login, several at once ──────────────────
   await page.getByRole("button", { name: "New item" }).first().click();
-  await dialog().getByRole("button", { name: "Domain" }).click();
+  await dialog().getByRole("button", { name: "Change item type" }).click();
+  await page.getByRole("button", { name: "Domain", exact: true }).click();
   await dialog().locator("#f-domain").fill("first-domain.com");
   await dialog().locator("#f-registrar").fill("Namecheap");
   await dialog()
@@ -138,7 +139,8 @@ try {
 
   // A new domain suggests the registrar used before.
   await page.getByRole("button", { name: "New item" }).first().click();
-  await dialog().getByRole("button", { name: "Domain" }).click();
+  await dialog().getByRole("button", { name: "Change item type" }).click();
+  await page.getByRole("button", { name: "Domain", exact: true }).click();
   check(
     await dialog().getByRole("button", { name: "Namecheap", exact: true }).isVisible(),
     "suggestion chip: registrar used before",

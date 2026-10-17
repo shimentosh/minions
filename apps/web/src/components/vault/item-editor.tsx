@@ -11,6 +11,7 @@ import {
   type ItemCategory,
   isValidTotp,
   luhnValid,
+  nameFromHost,
   normalizeHost,
   parseDotenv,
   type SmartFillResult,
@@ -42,7 +43,6 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
-  DialogDescription,
   DialogFooter,
   DialogHeader,
   DialogPanel,
@@ -75,38 +75,60 @@ import { PasswordGenerator } from "./password-generator";
 import { SmartPaste } from "./smart-paste";
 import { TotpCode } from "./totp-code";
 
-function TypePicker({
-  onPick,
-  onPaste,
-}: {
-  onPick: (type: string) => void;
-  onPaste: (r: SmartFillResult) => void;
-}) {
+/** The type of a new item: a small menu in the title, Login unless changed. */
+function TypeMenu({ type, onPick }: { type: string; onPick: (type: string) => void }) {
+  const [open, setOpen] = useState(false);
+  const current = getItemType(type);
   const categories = Object.keys(CATEGORY_LABELS) as ItemCategory[];
   return (
-    <div className="space-y-4">
-      <SmartPaste onFill={onPaste} />
-      {categories.map((c) => (
-        <div key={c}>
-          <h3 className="mb-1.5 font-medium text-muted-foreground text-xs uppercase tracking-wide">
-            {CATEGORY_LABELS[c]}
-          </h3>
-          <div className="grid grid-cols-2 gap-1.5 sm:grid-cols-3">
-            {ITEM_TYPES.filter((t) => t.category === c).map((t) => (
-              <button
-                key={t.type}
-                type="button"
-                onClick={() => onPick(t.type)}
-                className="flex items-center gap-2 rounded-lg border p-2 text-left text-sm transition-colors hover:bg-accent"
-              >
-                <ItemGlyph type={t.type} className="size-7 [&_svg]:size-3.5" />
-                {t.label}
-              </button>
-            ))}
-          </div>
+    <Popover open={open} onOpenChange={setOpen}>
+      <PopoverTrigger
+        render={
+          <button
+            type="button"
+            className="-my-1 flex items-center gap-2 rounded-lg px-1.5 py-1 hover:bg-accent"
+            aria-label="Change item type"
+          />
+        }
+      >
+        <ItemGlyph type={type} className="size-7 [&_svg]:size-3.5" />
+        New {current?.label.toLowerCase()}
+        <ChevronDown className="size-4 text-muted-foreground" />
+      </PopoverTrigger>
+      <PopoverPopup
+        className="max-h-[min(28rem,70vh)] w-[min(26rem,calc(100vw-2rem))] overflow-y-auto"
+        align="start"
+      >
+        <div className="space-y-3">
+          {categories.map((c) => (
+            <div key={c}>
+              <h3 className="mb-1 px-1 font-medium text-[11px] text-muted-foreground uppercase tracking-wide">
+                {CATEGORY_LABELS[c]}
+              </h3>
+              <div className="grid grid-cols-2 gap-0.5">
+                {ITEM_TYPES.filter((t) => t.category === c).map((t) => (
+                  <button
+                    key={t.type}
+                    type="button"
+                    onClick={() => {
+                      onPick(t.type);
+                      setOpen(false);
+                    }}
+                    className={cn(
+                      "flex items-center gap-2 rounded-md px-1.5 py-1 text-left text-sm hover:bg-accent",
+                      t.type === type && "bg-accent font-medium",
+                    )}
+                  >
+                    <ItemGlyph type={t.type} className="size-5 rounded [&_svg]:size-3" />
+                    <span className="truncate">{t.label}</span>
+                  </button>
+                ))}
+              </div>
+            </div>
+          ))}
         </div>
-      ))}
-    </div>
+      </PopoverPopup>
+    </Popover>
   );
 }
 
@@ -377,10 +399,17 @@ function EditorForm({
   const projects = ws ? [] : personalProjects;
   const collections = ws ? folders : personalCollections;
   const [access, setAccess] = useState<AccessDraft>({ mode: "private", members: {} });
-  const [type, setType] = useState(existing?.type ?? request.type ?? "");
+  // New items start as a login, the most common thing to save; the title menu changes it.
+  const [type, setType] = useState(
+    existing?.type ?? (request.type && getItemType(request.type) ? request.type : "LOGIN"),
+  );
   const def = getItemType(type);
   const [id, setId] = useState(existing?.id ?? crypto.randomUUID());
   const [name, setName] = useState(existing?.name ?? request.name ?? "");
+  // Until the person types a name, a new item is named after its website.
+  const [nameTouched, setNameTouched] = useState(!!(existing || request.name));
+  // Logins usually sign in with an email; the username field waits until asked for.
+  const [showUsername, setShowUsername] = useState(false);
   const [description, setDescription] = useState(existing?.description ?? "");
   const [values, setValues] = useState<Record<string, string>>(() => ({
     ...(plain ?? {}),
@@ -429,7 +458,7 @@ function EditorForm({
   function applyPaste(r: SmartFillResult) {
     if (!type || r.type !== type) setType(r.type);
     setValues((s) => ({ ...s, ...r.values }));
-    if (r.name && !name) setName(r.name);
+    if (r.name && !nameTouched) setName(r.name);
     if (getItemType(r.type)?.fields.some((f) => f.advanced && r.values[f.key]))
       setShowAdvanced(true);
   }
@@ -443,6 +472,18 @@ function EditorForm({
   const host = normalizeHost(
     values.url ?? values.base_url ?? values.console_url ?? values.endpoint ?? null,
   );
+  const autoName = nameFromHost(host);
+  useEffect(() => {
+    if (!nameTouched && autoName) setName(autoName);
+  }, [autoName, nameTouched]);
+  const hasWebsite = !!def?.fields.some((f) => f.key === "url");
+  // A new login opens on its website: the name follows from it.
+  useEffect(() => {
+    if (!isNew || !hasWebsite) return;
+    const t = window.setTimeout(() => document.getElementById("f-url")?.focus(), 50);
+    return () => window.clearTimeout(t);
+  }, [isNew, hasWebsite]);
+  const usernameHidden = type === "LOGIN" && !showUsername && !values.username;
   const provider =
     values.provider ??
     values.issuer ??
@@ -696,28 +737,20 @@ function EditorForm({
     ];
     setValues((s) => Object.fromEntries(Object.entries(s).filter(([k]) => sticky.includes(k))));
     setName("");
+    setNameTouched(false);
     setDescription("");
     setId(crypto.randomUUID());
     setLinked((l) => (l ? { ...l, relationId: undefined } : l));
     window.setTimeout(
-      () => document.getElementById(type === "DOMAIN" ? "f-domain" : "item-name")?.focus(),
+      () =>
+        document
+          .getElementById(type === "DOMAIN" ? "f-domain" : hasWebsite ? "f-url" : "item-name")
+          ?.focus(),
       50,
     );
   }
 
-  if (!def) {
-    return (
-      <>
-        <DialogHeader>
-          <DialogTitle>New item</DialogTitle>
-          <DialogDescription>What are you saving?</DialogDescription>
-        </DialogHeader>
-        <DialogPanel>
-          <TypePicker onPick={setType} onPaste={applyPaste} />
-        </DialogPanel>
-      </>
-    );
-  }
+  if (!def) return null;
 
   return (
     <form
@@ -729,8 +762,14 @@ function EditorForm({
     >
       <DialogHeader>
         <DialogTitle className="flex items-center gap-2">
-          <ItemGlyph type={type} className="size-7 [&_svg]:size-3.5" />
-          {existing ? `Edit ${def.label.toLowerCase()}` : `New ${def.label.toLowerCase()}`}
+          {existing ? (
+            <>
+              <ItemGlyph type={type} className="size-7 [&_svg]:size-3.5" />
+              Edit {def.label.toLowerCase()}
+            </>
+          ) : (
+            <TypeMenu type={type} onPick={setType} />
+          )}
         </DialogTitle>
       </DialogHeader>
       <DialogPanel className="space-y-4">
@@ -747,9 +786,13 @@ function EditorForm({
           <Input
             id="item-name"
             value={name}
-            onChange={(e) => setName(e.target.value)}
-            placeholder={def.label}
-            autoFocus={isNew}
+            onChange={(e) => {
+              setName(e.target.value);
+              // Clearing it hands the name back to the website.
+              setNameTouched(e.target.value !== "");
+            }}
+            placeholder={hasWebsite ? "Filled in from the website" : def.label}
+            autoFocus={isNew && !hasWebsite}
             maxLength={200}
           />
         </div>
@@ -816,6 +859,7 @@ function EditorForm({
 
         {visibleFields
           .filter((f) => !hiddenByLink(f.key))
+          .filter((f) => !(f.key === "username" && usernameHidden))
           .map((f) => {
             const Icon = fieldIcon(f);
             const chips = (suggestions?.[f.key] ?? [])
@@ -824,15 +868,29 @@ function EditorForm({
             const multi = isNew && !ws && type === "DOMAIN" && f.key === "domain";
             return (
               <div key={f.key} className="space-y-1.5">
-                <Label htmlFor={`f-${f.key}`} className="flex items-center gap-1.5">
-                  <Icon className="size-3.5 text-muted-foreground" aria-hidden />
-                  {f.label}
-                  {f.sensitive && (
-                    <Badge variant="outline" size="sm">
-                      encrypted
-                    </Badge>
+                <div className="flex items-center justify-between gap-2">
+                  <Label htmlFor={`f-${f.key}`} className="flex items-center gap-1.5">
+                    <Icon className="size-3.5 text-muted-foreground" aria-hidden />
+                    {f.label}
+                    {f.sensitive && (
+                      <Badge variant="outline" size="sm">
+                        encrypted
+                      </Badge>
+                    )}
+                  </Label>
+                  {f.key === "email" && usernameHidden && (
+                    <button
+                      type="button"
+                      className="flex items-center gap-1 text-muted-foreground text-xs hover:text-foreground"
+                      onClick={() => {
+                        setShowUsername(true);
+                        window.setTimeout(() => document.getElementById("f-username")?.focus(), 0);
+                      }}
+                    >
+                      <Plus className="size-3" /> Username
+                    </button>
                   )}
-                </Label>
+                </div>
                 <FieldInput
                   def={f}
                   value={values[f.key] ?? ""}
@@ -1092,11 +1150,6 @@ function EditorForm({
         </div>
       </DialogPanel>
       <DialogFooter>
-        {isNew && !request.type && (
-          <Button variant="ghost" className="sm:mr-auto" onClick={() => setType("")}>
-            Change type
-          </Button>
-        )}
         <Button variant="ghost" onClick={closeEditor}>
           Cancel
         </Button>

@@ -343,3 +343,52 @@ export function findProviderByName(name: string | null | undefined): ProviderDef
   const n = norm(name);
   return PROVIDERS.find((p) => [p.name, ...(p.aliases ?? [])].some((c) => norm(c) === n));
 }
+
+/** Subdomains that say how you reach a site, not which site it is. */
+const GENERIC_SUBDOMAINS = new Set([
+  "www",
+  "app",
+  "apps",
+  "web",
+  "login",
+  "signin",
+  "auth",
+  "sso",
+  "id",
+  "account",
+  "accounts",
+  "my",
+  "portal",
+  "dashboard",
+  "dash",
+  "console",
+  "admin",
+  "secure",
+  "m",
+]);
+
+/**
+ * A readable item name for a website: the provider's name when it is known
+ * ("github.com" → "GitHub"), otherwise the most specific label that names
+ * the site ("linkdesk.sentosh.com" → "Linkdesk", "app.example.co.uk" →
+ * "Example"). Null for an empty host.
+ */
+export function nameFromHost(host: string | null | undefined): string | null {
+  if (!host) return null;
+  const known = findProviderByHost(host);
+  if (known) return known.name;
+  const h = host.toLowerCase().replace(/:\d+$/, "");
+  if (/^[\d.]+$/.test(h) || h.includes(":")) return h; // an IP address
+  const labels = h.split(".").filter(Boolean);
+  if (labels.length === 1) return capitalize(labels[0]!);
+  // Drop the public suffix: one label ("com"), or two for "co.uk"-style suffixes.
+  const tld =
+    labels.length > 2 && labels.at(-2)!.length <= 3 && labels.at(-1)!.length === 2 ? 2 : 1;
+  const named = labels.slice(0, -tld).filter((l) => !GENERIC_SUBDOMAINS.has(l));
+  const pick = named[0] ?? labels.at(-tld - 1) ?? labels[0]!;
+  return capitalize(pick);
+}
+
+function capitalize(s: string) {
+  return s.charAt(0).toUpperCase() + s.slice(1);
+}

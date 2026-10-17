@@ -59,9 +59,10 @@ try {
 
   step("create login via editor");
   await page.getByRole("button", { name: "New item" }).first().click();
-  await page.getByRole("button", { name: "Login" }).click();
+  // New items open as a login.
   await page.getByLabel("Name", { exact: true }).fill("GitHub");
   await page.getByLabel("Website", { exact: true }).fill("https://github.com/login");
+  await page.getByRole("button", { name: "Username" }).click();
   await page.getByLabel("Username", { exact: true }).fill("octocat");
   await page.locator("#f-password").fill("hunter2");
   await shot("03-editor-login");

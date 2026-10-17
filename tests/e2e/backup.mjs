@@ -53,7 +53,7 @@ try {
   );
   await a.page
     .getByRole("dialog")
-    .getByPlaceholder(/github\.com {2}me@gmail\.com/)
+    .getByLabel("Paste anything")
     .click();
   await a.page.keyboard.press("Control+V");
   await a.page.getByRole("dialog").getByRole("button", { name: "Save", exact: true }).click();

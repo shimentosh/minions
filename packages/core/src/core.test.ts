@@ -8,6 +8,7 @@ import { parseCsv } from "./import/csv";
 import { parseImport } from "./import/normalize";
 import { getItemType, ITEM_TYPES, resolveField } from "./item-types";
 import { estimateStrength, generatePassword } from "./password";
+import { nameFromHost } from "./providers";
 import { generateTotp, parseTotp, verifyTotp } from "./totp";
 import { matchHost, normalizeHost } from "./url";
 
@@ -240,5 +241,18 @@ describe("provider tokens", () => {
     });
     expect(r.classification.type).toBe("API_KEY");
     expect(r.classification.confidence).toBeGreaterThanOrEqual(0.85);
+  });
+});
+
+describe("nameFromHost", () => {
+  it("names a website for a new item", () => {
+    expect(nameFromHost("github.com")).toBe("GitHub");
+    expect(nameFromHost("linkdesk.sentosh.com")).toBe("Linkdesk");
+    expect(nameFromHost("www.example.com")).toBe("Example");
+    expect(nameFromHost("app.example.co.uk")).toBe("Example");
+    expect(nameFromHost("login.acme.io")).toBe("Acme");
+    expect(nameFromHost("localhost")).toBe("Localhost");
+    expect(nameFromHost("192.168.1.10")).toBe("192.168.1.10");
+    expect(nameFromHost(null)).toBeNull();
   });
 });

@@ -108,9 +108,10 @@ try {
   step("owner adds a login shared with the member");
   await owner.nav(wsPath);
   await owner.page.getByRole("button", { name: "Add", exact: true }).click();
-  await owner.page.getByRole("button", { name: "Login" }).click();
+  // New items open as a login.
   await owner.page.getByLabel("Name", { exact: true }).fill("Client Facebook Ads");
   await owner.page.getByLabel("Website", { exact: true }).fill("https://business.facebook.com");
+  await owner.page.getByRole("button", { name: "Username" }).click();
   await owner.page.getByLabel("Username", { exact: true }).fill("ads@acme.test");
   await owner.page.locator("#f-password").fill(SECRET);
   await owner.page.getByRole("radio", { name: /Specific members/ }).click();
