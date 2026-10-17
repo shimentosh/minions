@@ -141,8 +141,22 @@ limit. They are listed so nobody mistakes them for solved.
 ## Recovery and lifecycle
 
 - **Forgotten master password:** the vault cannot be recovered, by design.
-  Nobody, including the server operator, can reset it. 2FA recovery codes
-  recover the *second factor* only, not the vault.
+  Nobody, including the server operator, can decrypt it. 2FA recovery codes
+  recover the *second factor* only, not the vault. What the person can do is
+  **reset the account** ("Forgot password?" on the sign-in and lock screens):
+  a single-use link (token in the URL fragment, SHA-256 stored, 1 h, not
+  re-sent within 2 minutes) proves the email; the client makes new keys as at
+  sign-up; one transaction then deletes the personal vault and everything in
+  it, share links, people shares both ways, sessions, devices, passkeys, 2FA,
+  the sharing key pair and the personal activity history, and ends workspace
+  memberships as a removal would (items flagged for re-keying, items only they
+  could open deleted). A workspace they own passes to its longest-standing
+  confirmed admin, else member, or is deleted if they were alone in it. The
+  link opens nothing of the old vault, so someone who controls the mailbox can
+  destroy the account but not read it; with 2FA on, the reset also needs a
+  TOTP or recovery code, counted against the lockout. The request endpoint
+  answers before doing any work, so neither its body nor its timing reveals
+  whether an account exists. Tested in `account-reset.test.ts`.
 - **New device:** sign in with email, master password and 2FA; the client
   derives the keys locally. The server raises a `new_device` security event.
 - **Lost device:** revoke it under Devices (ends its sessions immediately), or

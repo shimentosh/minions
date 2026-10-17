@@ -4,6 +4,7 @@ import {
   IsEmail,
   IsIn,
   IsInt,
+  IsOptional,
   IsString,
   IsUUID,
   Length,
@@ -16,6 +17,8 @@ import {
 } from "class-validator";
 
 const ENVELOPE = /^v1\.[A-Za-z0-9+/]{16}\.[A-Za-z0-9+/]+={0,2}$/;
+/** 32 random bytes, base64url. Only its SHA-256 is stored. */
+const LINK_TOKEN = /^[A-Za-z0-9_-]{43}$/;
 
 export class DeviceDto {
   @IsString() @Length(8, 100) clientDeviceId!: string;
@@ -76,4 +79,24 @@ export class ChangePasswordDto {
   @IsBase64() @Length(44, 44) newAuthKey!: string;
   @ValidateNested() @Type(() => KdfDto) kdf!: KdfDto;
   @Matches(ENVELOPE) @MaxLength(200) protectedUserKey!: string;
+}
+
+export class ResetRequestDto {
+  @IsEmail() @MaxLength(254) email!: string;
+}
+
+export class ResetTokenDto {
+  @Matches(LINK_TOKEN) token!: string;
+}
+
+/** A fresh start for an account whose master password was forgotten: new keys, empty vault. */
+export class ResetCompleteDto extends ResetTokenDto {
+  /** Required when the account has two-factor sign-in: a TOTP or recovery code. */
+  @IsOptional() @IsString() @MinLength(6) @MaxLength(20) code?: string;
+  @IsUUID(4) vaultId!: string;
+  @IsBase64() @Length(44, 44) authKey!: string;
+  @ValidateNested() @Type(() => KdfDto) kdf!: KdfDto;
+  @Matches(ENVELOPE) @MaxLength(200) protectedUserKey!: string;
+  @Matches(ENVELOPE) @MaxLength(200) protectedVaultKey!: string;
+  @ValidateNested() @Type(() => DeviceDto) device!: DeviceDto;
 }

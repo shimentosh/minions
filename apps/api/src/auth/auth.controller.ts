@@ -1,5 +1,5 @@
 import type { AuthResult } from "@minions/core";
-import { Body, Controller, Get, HttpCode, Post, Res } from "@nestjs/common";
+import { Body, Controller, Get, HttpCode, Logger, Post, Res } from "@nestjs/common";
 import { Throttle } from "@nestjs/throttler";
 import type { Response } from "express";
 import {
@@ -21,6 +21,9 @@ import {
   LoginDto,
   PreloginDto,
   RegisterDto,
+  ResetCompleteDto,
+  ResetRequestDto,
+  ResetTokenDto,
   TwoFactorVerifyDto,
 } from "./auth.dto";
 import { type AuthOutcome, AuthService } from "./auth.service";
@@ -41,6 +44,8 @@ function send(res: Response, outcome: AuthOutcome): AuthResult {
 
 @Controller("auth")
 export class AuthController {
+  private readonly logger = new Logger("AccountReset");
+
   constructor(private readonly auth: AuthService) {}
 
   @Public()
@@ -72,6 +77,40 @@ export class AuthController {
     @Res({ passthrough: true }) res: Response,
   ) {
     return send(res, await this.auth.login(dto, client));
+  }
+
+  /** Forgotten master password. Answers the same whether or not the account exists. */
+  @Public()
+  @Throttle({ default: { limit: 3, ttl: 10 * 60_000 } })
+  @Post("reset/request")
+  @HttpCode(202)
+  requestReset(@Body() dto: ResetRequestDto) {
+    // Runs after the response, so its timing cannot tell whether the account exists.
+    void this.auth
+      .requestReset(dto.email)
+      .catch((e) =>
+        this.logger.error(`Reset request failed: ${e instanceof Error ? e.name : "error"}`),
+      );
+  }
+
+  @Public()
+  @Throttle(AUTH_THROTTLE)
+  @Post("reset/check")
+  @HttpCode(200)
+  checkReset(@Body() dto: ResetTokenDto) {
+    return this.auth.checkReset(dto.token);
+  }
+
+  @Public()
+  @Throttle({ default: { limit: 5, ttl: 60_000 } })
+  @Post("reset/complete")
+  @HttpCode(200)
+  async completeReset(
+    @Body() dto: ResetCompleteDto,
+    @Client() client: ClientInfo,
+    @Res({ passthrough: true }) res: Response,
+  ) {
+    return send(res, await this.auth.completeReset(dto, client));
   }
 
   @AllowPending2fa()

@@ -1,15 +1,15 @@
 import { estimateStrength } from "@minions/core";
-import { Eye, EyeOff, Fingerprint, Lock, ShieldCheck } from "lucide-react";
+import { Eye, EyeOff, Fingerprint, Lock, MailCheck, ShieldCheck } from "lucide-react";
 import { type ReactNode, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Card, CardDescription, CardHeader, CardPanel, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { errorMessage } from "@/lib/api";
+import { errorMessage, post } from "@/lib/api";
 import { cn } from "@/lib/cn";
 import { useSession } from "@/lib/session";
 
-function AuthLayout({
+export function AuthLayout({
   children,
   title,
   subtitle,
@@ -81,7 +81,7 @@ export function PasswordInput({
   );
 }
 
-function FormError({ error }: { error: string | null }) {
+export function FormError({ error }: { error: string | null }) {
   if (!error) return null;
   return (
     <p className="rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-2 text-destructive-foreground text-sm">
@@ -214,12 +214,110 @@ function TwoFactorStep() {
   );
 }
 
+/**
+ * Forgotten master password. The vault is encrypted with it on this device,
+ * so it cannot be recovered; the emailed link resets the account to an empty
+ * vault instead. The answer is the same whether or not the account exists.
+ */
+function ForgotPassword({ initialEmail, onBack }: { initialEmail: string; onBack: () => void }) {
+  const [email, setEmail] = useState(initialEmail);
+  const [sentTo, setSentTo] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  async function submit(e: React.FormEvent) {
+    e.preventDefault();
+    setBusy(true);
+    setError(null);
+    try {
+      await post("/auth/reset/request", { email: email.trim() });
+      setSentTo(email.trim());
+    } catch (err) {
+      setError(errorMessage(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const back = (
+    <button
+      type="button"
+      className="w-full text-center text-muted-foreground text-sm hover:text-foreground"
+      onClick={onBack}
+    >
+      Back to sign in
+    </button>
+  );
+
+  if (sentTo)
+    return (
+      <AuthLayout title="Check your email">
+        <div className="space-y-4">
+          <p className="flex gap-2.5 text-muted-foreground text-sm">
+            <MailCheck className="mt-0.5 size-4 shrink-0 text-foreground" />
+            <span>
+              If <span className="font-medium text-foreground">{sentTo}</span> has a Minions
+              account, a reset link is on its way. It works once and expires in 1 hour.
+            </span>
+          </p>
+          <p className="text-muted-foreground text-xs">
+            Remembered your password? Nothing changes until you open the link and confirm.
+          </p>
+          {back}
+        </div>
+      </AuthLayout>
+    );
+
+  return (
+    <AuthLayout
+      title="Forgot your master password?"
+      subtitle="Nobody can recover it, not even the server. Your vault is encrypted with it on your device."
+    >
+      <form className="space-y-4" onSubmit={submit}>
+        <div className="space-y-1.5 rounded-lg bg-muted/60 px-3 py-2.5 text-sm">
+          <p className="font-medium">Before you reset</p>
+          <ul className="list-disc space-y-1 ps-4 text-muted-foreground">
+            <li>
+              Check where you might have saved it: a browser, another password manager, paper.
+            </li>
+            <li>Try the variations you usually use: capitals, spaces, a number at the end.</li>
+          </ul>
+        </div>
+        <p className="rounded-lg bg-warning/8 px-3 py-2 text-warning-foreground text-xs">
+          Resetting deletes everything in your vault and starts an empty one on the same email.
+          Workspaces you own pass to an admin, or are deleted if you are their only member.
+        </p>
+        <div className="space-y-1.5">
+          <Label htmlFor="reset-email">Email</Label>
+          <Input
+            id="reset-email"
+            type="email"
+            value={email}
+            onChange={(e) => setEmail(e.target.value)}
+            autoComplete="username"
+            autoFocus
+          />
+        </div>
+        <FormError error={error} />
+        <Button type="submit" className="w-full" loading={busy} disabled={!email.includes("@")}>
+          Email me a reset link
+        </Button>
+        {back}
+      </form>
+    </AuthLayout>
+  );
+}
+
 export function SignInScreen() {
   const status = useSession((s) => s.status);
   const login = useSession((s) => s.login);
   const register = useSession((s) => s.register);
-  const [mode, setMode] = useState<"login" | "register">(() =>
-    window.location.pathname === "/register" ? "register" : "login",
+  const [mode, setMode] = useState<"login" | "register" | "forgot">(() =>
+    window.location.pathname === "/register"
+      ? "register"
+      : window.location.pathname === "/forgot-password"
+        ? "forgot"
+        : "login",
   );
   // An invitation link (someone shared a password) carries the address it was sent to.
   const [invitedEmail] = useState(() =>
@@ -227,7 +325,11 @@ export function SignInScreen() {
       ? (new URLSearchParams(window.location.search).get("email") ?? "").slice(0, 254)
       : "",
   );
-  const [email, setEmail] = useState(invitedEmail);
+  const [email, setEmail] = useState(() =>
+    window.location.pathname === "/forgot-password"
+      ? (new URLSearchParams(window.location.search).get("email") ?? "").slice(0, 254)
+      : invitedEmail,
+  );
   const [name, setName] = useState("");
   const [password, setPassword] = useState("");
   const [confirm, setConfirm] = useState("");
@@ -235,6 +337,16 @@ export function SignInScreen() {
   const [busy, setBusy] = useState(false);
 
   if (status === "two-factor") return <TwoFactorStep />;
+  if (mode === "forgot")
+    return (
+      <ForgotPassword
+        initialEmail={email}
+        onBack={() => {
+          setMode("login");
+          setError(null);
+        }}
+      />
+    );
 
   const strength = estimateStrength(password);
   const canRegister =
@@ -299,7 +411,22 @@ export function SignInScreen() {
           />
         </div>
         <div className="space-y-1.5">
-          <Label htmlFor="password">Master password</Label>
+          <div className="flex items-center justify-between gap-2">
+            <Label htmlFor="password">Master password</Label>
+            {mode === "login" && (
+              <button
+                type="button"
+                className="text-muted-foreground text-xs underline-offset-4 hover:text-foreground hover:underline"
+                onClick={() => {
+                  setMode("forgot");
+                  setPassword("");
+                  setError(null);
+                }}
+              >
+                Forgot password?
+              </button>
+            )}
+          </div>
           <PasswordInput
             id="password"
             value={password}
@@ -399,13 +526,24 @@ export function LockScreen() {
         <Button type="submit" className="w-full" loading={busy} disabled={!password}>
           <Lock /> Unlock
         </Button>
-        <button
-          type="button"
-          className="w-full text-center text-muted-foreground text-xs hover:text-foreground"
-          onClick={() => void logout()}
-        >
-          Sign out
-        </button>
+        <div className="flex items-center justify-center gap-3 text-muted-foreground text-xs">
+          <button type="button" className="hover:text-foreground" onClick={() => void logout()}>
+            Sign out
+          </button>
+          <span aria-hidden>·</span>
+          <button
+            type="button"
+            className="hover:text-foreground"
+            onClick={() => {
+              // The sign-in screen opens on the forgot-password step for this address.
+              const q = me ? `?email=${encodeURIComponent(me.user.email)}` : "";
+              window.history.replaceState(null, "", `/forgot-password${q}`);
+              void logout();
+            }}
+          >
+            Forgot password?
+          </button>
+        </div>
       </form>
     </AuthLayout>
   );

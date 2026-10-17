@@ -154,6 +154,8 @@ interface SessionState {
   twoFactorMethods: ("totp" | "passkey")[];
   refresh: () => Promise<void>;
   register: (input: { email: string; name: string; password: string }) => Promise<void>;
+  /** Forgotten master password: a fresh, empty vault on the same account (see the reset email). */
+  resetAccount: (input: { token: string; password: string; code?: string }) => Promise<void>;
   login: (input: { email: string; password: string }) => Promise<"ok" | "two_factor_required">;
   verifyTwoFactor: (code: string) => Promise<void>;
   verifyPasskey: () => Promise<void>;
@@ -277,6 +279,32 @@ async function openAfterSecondFactor(result: AuthResult) {
   }
 }
 
+/** After sign-up or an account reset: the keys were just made here, so no unwrapping. */
+async function openFreshVault(
+  result: AuthResult,
+  keys: Awaited<ReturnType<typeof createAccountKeys>>,
+  userId: string,
+  vaultId: string,
+) {
+  if (result.token) {
+    setBearerToken(result.token);
+    rememberDesktopSession(result.token);
+  }
+  wipe(vaultKey);
+  vaultKey = keys.vaultKey;
+  try {
+    await openSharing(keys.userKey, {
+      userId,
+      vaultId,
+      kdf: keys.kdf,
+      protectedUserKey: keys.protectedUserKey,
+      protectedVaultKey: keys.protectedVaultKey,
+    });
+  } finally {
+    wipe(keys.userKey);
+  }
+}
+
 export const useSession = create<SessionState>((set, getState) => ({
   status: "loading",
   me: null,
@@ -310,23 +338,31 @@ export const useSession = create<SessionState>((set, getState) => ({
       protectedVaultKey: keys.protectedVaultKey,
       device: deviceInfo(),
     });
-    if (result.token) {
-      setBearerToken(result.token);
-      rememberDesktopSession(result.token);
-    }
-    wipe(vaultKey);
-    vaultKey = keys.vaultKey;
-    try {
-      await openSharing(keys.userKey, {
-        userId,
-        vaultId,
-        kdf: keys.kdf,
-        protectedUserKey: keys.protectedUserKey,
-        protectedVaultKey: keys.protectedVaultKey,
-      });
-    } finally {
+    await openFreshVault(result, keys, userId, vaultId);
+    await getState().refresh();
+  },
+
+  async resetAccount({ token, password, code }) {
+    const { userId } = await post<{ userId: string }>("/auth/reset/check", { token });
+    // A new vault id: nothing encrypted for the old vault can be mistaken for the new one.
+    const vaultId = crypto.randomUUID();
+    const keys = await createAccountKeys(password, userId, vaultId);
+    const result = await post<AuthResult>("/auth/reset/complete", {
+      token,
+      ...(code ? { code } : {}),
+      vaultId,
+      authKey: keys.authKey,
+      kdf: keys.kdf,
+      protectedUserKey: keys.protectedUserKey,
+      protectedVaultKey: keys.protectedVaultKey,
+      device: deviceInfo(),
+    }).catch((e) => {
+      wipe(keys.vaultKey);
       wipe(keys.userKey);
-    }
+      throw e;
+    });
+    closeVault();
+    await openFreshVault(result, keys, userId, vaultId);
     await getState().refresh();
   },
 

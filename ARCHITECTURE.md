@@ -72,6 +72,10 @@ login(email, authKey, device) → session (state PENDING_2FA if 2FA on)
 2fa/verify(code | recovery code) → session ACTIVE
 vault/kdf → kdf params (all a locked session gets)
 vault/unlock(authKey) → wrapped keys; session.vault_unlocked_until = now + autoLock
+
+reset/request(email) → 202, always; link mailed if the account exists
+reset/check(token) → email, userId, whether 2FA is needed
+reset/complete(token, [code], new keys, device) → old vault deleted, session ACTIVE
 ```
 
 * Session tokens: 256-bit random, only the SHA-256 is stored. Web uses an

@@ -223,8 +223,10 @@ see [what the server can see](ARCHITECTURE.md#what-the-server-can-see-safe-metad
 
 **What happens if I forget my master password?**
 Your vault cannot be recovered, not even by the server owner. That is the price of
-end-to-end encryption. Keep an encrypted backup (Settings → Backup & recovery) and store
-your master password somewhere safe.
+end-to-end encryption, and an encrypted backup is locked by the same password. "Forgot
+password?" on the sign-in screen emails a link that resets your account: you choose a new
+master password and start again with an empty vault on the same email. Store your master
+password somewhere safe.
 
 **Does the AI see my passwords?**
 No. AI organizing is optional and off without an API key. It only receives names and
