@@ -8,13 +8,14 @@ import {
   HttpCode,
   Injectable,
   Module,
+  Patch,
   Post,
   Res,
   UseGuards,
 } from "@nestjs/common";
 import { Throttle } from "@nestjs/throttler";
 import { Type } from "class-transformer";
-import { ArrayMaxSize, IsArray, IsUUID, ValidateNested } from "class-validator";
+import { ArrayMaxSize, IsArray, IsString, IsUUID, Length, ValidateNested } from "class-validator";
 import type { Response } from "express";
 import { ActivityService } from "../activity/activity.service";
 import { AuthKeyDto, DeviceDto } from "../auth/auth.dto";
@@ -30,6 +31,10 @@ import {
 import { VaultUnlockedGuard } from "../common/guards";
 import { PrismaService } from "../common/prisma.service";
 import { SessionsService } from "../sessions/sessions.service";
+
+class VaultNameDto {
+  @IsString() @Length(1, 80) name!: string;
+}
 
 class ExistingDto {
   @IsArray() @ArrayMaxSize(5000) @IsUUID(4, { each: true }) itemIds!: string[];
@@ -275,6 +280,18 @@ export class VaultController {
   @HttpCode(204)
   async lock(@Auth() auth: AuthContext) {
     await this.vault.lock(auth);
+  }
+
+  /** Renames the personal vault (what the workspace switcher shows). Not secret. */
+  @Patch("name")
+  @HttpCode(204)
+  async rename(@Auth() auth: AuthContext, @Body() dto: VaultNameDto) {
+    const name = dto.name.trim();
+    if (!name) throw new BadRequestException("Name is required");
+    await this.vault.prisma.vault.updateMany({
+      where: { id: auth.vaultId, userId: auth.userId },
+      data: { name },
+    });
   }
 
   @UseGuards(VaultUnlockedGuard)

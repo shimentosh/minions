@@ -196,7 +196,7 @@ model Session {
 model Vault {
   id                  String   @id @db.Uuid
   userId              String?  @db.Uuid
-  name                String   @default("Personal")
+  name                String   @default("Personal vault")
   /// Personal: vault key wrapped by the user key. Workspace vaults: unused ("-"),
   /// each item has its own key (see WorkspaceItemGrant).
   protectedKey        String

@@ -60,7 +60,7 @@ export function WorkspaceSwitcher() {
         {current ? <WorkspaceMark id={current.id} name={current.name} /> : <PersonalMark />}
         <span className="min-w-0 flex-1">
           <span className="block truncate font-semibold text-sidebar-accent-foreground text-sm">
-            {current ? current.name : "Personal vault"}
+            {current ? current.name : (me?.vaultName ?? "Personal vault")}
           </span>
           <span className="block truncate text-[11px] text-sidebar-foreground">
             {current
@@ -80,7 +80,7 @@ export function WorkspaceSwitcher() {
           <MenuGroupLabel>Personal</MenuGroupLabel>
           <MenuItem onClick={() => void navigate({ to: "/vault" })}>
             <PersonalMark className="size-5 rounded-md" />
-            <span className="min-w-0 flex-1 truncate">Personal vault</span>
+            <span className="min-w-0 flex-1 truncate">{me?.vaultName ?? "Personal vault"}</span>
             {!current && <Check className="size-4" />}
           </MenuItem>
         </MenuGroup>

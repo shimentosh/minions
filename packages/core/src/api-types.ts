@@ -83,6 +83,8 @@ export interface MeResponse {
     vaultUnlockedUntil: string | null;
   };
   vaultId: string;
+  /** The personal vault's name, shown in the workspace switcher. */
+  vaultName: string;
 }
 
 export interface ItemField {

@@ -402,6 +402,10 @@ export class AuthService {
 
   async me(auth: AuthContext): Promise<MeResponse> {
     const user = await this.prisma.user.findUniqueOrThrow({ where: { id: auth.userId } });
+    const vault = await this.prisma.vault.findUnique({
+      where: { id: auth.vaultId },
+      select: { name: true },
+    });
     const unlocked = !!auth.vaultUnlockedUntil && auth.vaultUnlockedUntil > new Date();
     return {
       user: {
@@ -423,6 +427,7 @@ export class AuthService {
         vaultUnlockedUntil: unlocked ? auth.vaultUnlockedUntil!.toISOString() : null,
       },
       vaultId: auth.vaultId,
+      vaultName: vault?.name ?? "Personal vault",
     };
   }
 

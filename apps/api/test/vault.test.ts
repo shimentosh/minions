@@ -560,3 +560,19 @@ describe("bulk organise", () => {
     await user.agent.patch("/vault/items/bulk").send({ ids: [] }).expect(400);
   });
 });
+
+describe("vault name", () => {
+  it("starts as Personal vault and can be renamed by its owner only", async () => {
+    const user = await registerUser(app);
+    const other = await registerUser(app);
+    expect((await user.agent.get("/auth/me").expect(200)).body.vaultName).toBe("Personal vault");
+    await user.agent.patch("/vault/name").send({ name: "  Shimanto's vault " }).expect(204);
+    expect((await user.agent.get("/auth/me").expect(200)).body.vaultName).toBe("Shimanto's vault");
+    await user.agent.patch("/vault/name").send({ name: "" }).expect(400);
+    await user.agent
+      .patch("/vault/name")
+      .send({ name: "x".repeat(81) })
+      .expect(400);
+    expect((await other.agent.get("/auth/me").expect(200)).body.vaultName).toBe("Personal vault");
+  });
+});

@@ -1,12 +1,13 @@
+import type { WorkspaceSummary } from "@minions/core";
 import { useMutation } from "@tanstack/react-query";
 import { Link, useNavigate } from "@tanstack/react-router";
-import { Mail, Plus, Users } from "lucide-react";
+import { Check, Mail, Pencil, Plus, Users, X } from "lucide-react";
 import { useState } from "react";
 import { EmptyNote, Page, PageBody, Section } from "@/components/layout/page";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { errorMessage, post } from "@/lib/api";
+import { errorMessage, patch, post } from "@/lib/api";
 import { timeAgo } from "@/lib/format";
 import { toast } from "@/lib/toast";
 import { createWorkspace } from "@/lib/workspace-crypto";
@@ -88,31 +89,7 @@ export function WorkspacesPage() {
           )}
           <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
             {workspaces?.map((w) => (
-              <Link
-                key={w.id}
-                to="/w/$workspaceId"
-                params={{ workspaceId: w.id }}
-                className="flex items-center gap-3 rounded-lg border p-3 transition-colors hover:bg-accent/60"
-              >
-                <span className="flex size-9 items-center justify-center rounded-lg bg-muted">
-                  <Users className="size-4 text-muted-foreground" />
-                </span>
-                <span className="min-w-0 flex-1">
-                  <span className="block truncate font-medium text-sm">{w.name}</span>
-                  <span className="block text-muted-foreground text-xs">
-                    {w.memberCount} member{w.memberCount === 1 ? "" : "s"}
-                  </span>
-                </span>
-                {w.status === "CONFIRMED" ? (
-                  <Badge variant="outline" size="sm">
-                    {ROLE_LABEL[w.role]}
-                  </Badge>
-                ) : (
-                  <Badge variant="warning" size="sm">
-                    Awaiting confirmation
-                  </Badge>
-                )}
-              </Link>
+              <WorkspaceCard key={w.id} workspace={w} />
             ))}
           </div>
         </Section>
@@ -139,5 +116,104 @@ export function WorkspacesPage() {
         </Section>
       </PageBody>
     </Page>
+  );
+}
+
+/** One workspace in the list. Owners and admins can rename it in place. */
+function WorkspaceCard({ workspace: w }: { workspace: WorkspaceSummary }) {
+  const invalidate = useInvalidateWorkspaces();
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(w.name);
+  const canRename = w.status === "CONFIRMED" && (w.role === "OWNER" || w.role === "ADMIN");
+  const rename = useMutation({
+    mutationFn: () => patch(`/workspaces/${w.id}`, { name: draft.trim() }),
+    onSuccess: async () => {
+      setEditing(false);
+      await invalidate();
+      toast.success("Workspace renamed");
+    },
+    onError: (e) => toast.error(errorMessage(e)),
+  });
+
+  if (editing)
+    return (
+      <form
+        className="flex items-center gap-1.5 rounded-lg border p-2"
+        onSubmit={(e) => {
+          e.preventDefault();
+          if (draft.trim() && draft.trim() !== w.name) rename.mutate();
+          else setEditing(false);
+        }}
+      >
+        <Input
+          value={draft}
+          onChange={(e) => setDraft(e.target.value)}
+          onKeyDown={(e) => e.key === "Escape" && setEditing(false)}
+          maxLength={80}
+          autoFocus
+          aria-label="Workspace name"
+        />
+        <Button
+          type="submit"
+          size="icon-sm"
+          loading={rename.isPending}
+          disabled={!draft.trim()}
+          aria-label="Save name"
+        >
+          <Check />
+        </Button>
+        <Button
+          size="icon-sm"
+          variant="ghost"
+          onClick={() => setEditing(false)}
+          aria-label="Cancel rename"
+        >
+          <X />
+        </Button>
+      </form>
+    );
+
+  return (
+    <div className="group relative flex items-center gap-3 rounded-lg border p-3 transition-colors hover:bg-accent/60">
+      <Link
+        to="/w/$workspaceId"
+        params={{ workspaceId: w.id }}
+        className="absolute inset-0 rounded-lg"
+        aria-label={`Open ${w.name}`}
+      />
+      <span className="flex size-9 items-center justify-center rounded-lg bg-muted">
+        <Users className="size-4 text-muted-foreground" />
+      </span>
+      <span className="min-w-0 flex-1">
+        <span className="block truncate font-medium text-sm">{w.name}</span>
+        <span className="block text-muted-foreground text-xs">
+          {w.memberCount} member{w.memberCount === 1 ? "" : "s"}
+        </span>
+      </span>
+      {canRename && (
+        <Button
+          size="icon-xs"
+          variant="ghost"
+          className="relative opacity-60 group-hover:opacity-100"
+          onClick={() => {
+            setDraft(w.name);
+            setEditing(true);
+          }}
+          aria-label={`Rename ${w.name}`}
+          title="Rename"
+        >
+          <Pencil />
+        </Button>
+      )}
+      {w.status === "CONFIRMED" ? (
+        <Badge variant="outline" size="sm">
+          {ROLE_LABEL[w.role]}
+        </Badge>
+      ) : (
+        <Badge variant="warning" size="sm">
+          Awaiting confirmation
+        </Badge>
+      )}
+    </div>
   );
 }

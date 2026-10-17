@@ -660,6 +660,7 @@ export function SettingsPage() {
   const me = useSession((s) => s.me);
   const setSettings = useSession((s) => s.setSettings);
   const emergencyLock = useSession((s) => s.emergencyLock);
+  const refresh = useSession((s) => s.refresh);
   const [theme, setTheme] = useTheme();
   const [name, setName] = useState(me?.user.name ?? "");
   const ai = useQuery({
@@ -668,6 +669,7 @@ export function SettingsPage() {
   });
 
   useEffect(() => setName(me?.user.name ?? ""), [me?.user.name]);
+  useEffect(() => setVaultName(me?.vaultName ?? ""), [me?.vaultName]);
 
   const save = useMutation({
     mutationFn: (body: Record<string, unknown>) =>
@@ -680,6 +682,16 @@ export function SettingsPage() {
     onSuccess: (s) => {
       setSettings(s);
       toast.success("Saved");
+    },
+    onError: (e) => toast.error(errorMessage(e)),
+  });
+
+  const [vaultName, setVaultName] = useState(me?.vaultName ?? "");
+  const renameVault = useMutation({
+    mutationFn: () => patch("/vault/name", { name: vaultName.trim() }),
+    onSuccess: async () => {
+      await refresh();
+      toast.success("Vault renamed");
     },
     onError: (e) => toast.error(errorMessage(e)),
   });
@@ -720,6 +732,26 @@ export function SettingsPage() {
               </Row>
               <Row label="Email" hint="Used to sign in">
                 <span className="text-sm">{me.user.email}</span>
+              </Row>
+              <Row label="Vault name" hint="Shown at the top of the sidebar">
+                <div className="flex gap-1.5">
+                  <Input
+                    value={vaultName}
+                    onChange={(e) => setVaultName(e.target.value)}
+                    maxLength={80}
+                    className="w-56"
+                    aria-label="Vault name"
+                  />
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    loading={renameVault.isPending}
+                    disabled={!vaultName.trim() || vaultName.trim() === me.vaultName}
+                    onClick={() => renameVault.mutate()}
+                  >
+                    Save
+                  </Button>
+                </div>
               </Row>
             </Section>
 
