@@ -167,6 +167,8 @@ interface SessionState {
   }) => Promise<void>;
   /** Forgotten master password: the emailed link opens the vault, which gets a new master password. */
   resetPassword: (input: { token: string; password: string; code?: string }) => Promise<void>;
+  /** Forgotten master password, the other choice: the emailed link starts over with an empty vault. */
+  startOver: (input: { token: string; password: string; code?: string }) => Promise<void>;
   login: (input: { email: string; password: string }) => Promise<"ok" | "two_factor_required">;
   verifyTwoFactor: (code: string) => Promise<void>;
   verifyPasskey: () => Promise<void>;
@@ -463,6 +465,30 @@ export const useSession = create<SessionState>((set, getState) => ({
     await setForgottenPassword(userKey, opened.userId, password, "/auth/reset/complete", {
       token,
     });
+    await getState().refresh();
+  },
+
+  async startOver({ token, password, code }) {
+    const { userId } = await post<{ userId: string }>("/auth/reset/check", { token });
+    // A new vault id: nothing encrypted for the old vault can be mistaken for the new one.
+    const vaultId = crypto.randomUUID();
+    const keys = await createAccountKeys(password, userId, vaultId);
+    const result = await post<AuthResult>("/auth/reset/start-over", {
+      token,
+      ...(code ? { code } : {}),
+      vaultId,
+      authKey: keys.authKey,
+      kdf: keys.kdf,
+      protectedUserKey: keys.protectedUserKey,
+      protectedVaultKey: keys.protectedVaultKey,
+      device: deviceInfo(),
+    }).catch((e) => {
+      wipe(keys.vaultKey);
+      wipe(keys.userKey);
+      throw e;
+    });
+    closeVault();
+    await openFreshVault(result, keys, userId, vaultId);
     await getState().refresh();
   },
 

@@ -29,6 +29,7 @@ export const ACTIONS = [
   "auth.login_failed",
   "auth.registered",
   "auth.password_recovered",
+  "auth.account_reset",
   "device.added",
   "device.linked",
   "device.revoked",
@@ -86,6 +87,7 @@ export const SECURITY_EVENTS = [
   "email_verified",
   "backup_codes_created",
   "master_password_recovered",
+  "account_reset",
   "email_recovery_enabled",
   "email_recovery_disabled",
 ] as const;
