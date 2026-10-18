@@ -135,7 +135,12 @@ describe("email reset", () => {
     const token = await requestLink(user.email);
     expect(token).toBeTruthy();
     const check = await api().post("/auth/reset/check").send({ token }).expect(200);
-    expect(check.body).toEqual({ email: user.email, twoFactorRequired: false });
+    expect(check.body).toEqual({
+      email: user.email,
+      userId: user.userId,
+      twoFactorRequired: false,
+      canKeepVault: true,
+    });
 
     const { res, agent } = await reset(user, token!);
     expect(res.status).toBe(200);
@@ -231,10 +236,13 @@ describe("email reset", () => {
       (await prisma.user.findUniqueOrThrow({ where: { id: user.userId } })).recoveryKeyEnc,
     ).toBeNull();
 
-    // A new request explains instead of sending a link (after the cooldown).
+    // A new request (after the cooldown) sends a link that can only start fresh.
     await prisma.accountReset.deleteMany({ where: { userId: user.userId } });
-    expect(await requestLink(user.email)).toBeNull();
+    const fresh = (await requestLink(user.email))!;
     expect(testOutbox.findLast((m) => m.to === user.email)!.text).toMatch(/turned off/);
+    const check = await api().post("/auth/reset/check").send({ token: fresh }).expect(200);
+    expect(check.body.canKeepVault).toBe(false);
+    await api().post("/auth/reset/open").send({ token: fresh }).expect(400);
 
     // Turning it back on needs the master password and the user key.
     await user.agent

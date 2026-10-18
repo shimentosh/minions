@@ -165,6 +165,17 @@ limit. They are listed so nobody mistakes them for solved.
   master password too. Accounts with only a passkey are not asked for it
   here, so for them the mailbox alone is enough. Tested in
   `email-reset.test.ts`.
+- **Starting fresh from a reset link** (optional, and the only choice when
+  the server keeps no user key): the same link, plus the second factor when
+  2FA is on, sets a new master password with new keys made on the client and
+  an empty vault. In one transaction with spending the link, the server
+  deletes the old personal vault, share links, people shares, backup codes,
+  sessions, devices and personal history; owned workspaces pass to the
+  longest-standing admin (or member), or are deleted when nobody else is in
+  them, and other memberships end as if the person had left (items flagged
+  for re-keying). The link opens nothing of the old vault, so someone with
+  the mailbox (and second factor) can destroy the vault but not read it.
+  Two-factor sign-in stays on. Tested in `start-over.test.ts`.
 - **Forgotten master password, without email reset:** the vault cannot be
   recovered without a backup code. Nobody, including the server operator, can
   decrypt it. 2FA recovery codes

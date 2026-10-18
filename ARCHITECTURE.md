@@ -31,7 +31,11 @@ after an unlock the client sends the raw user key once, the server checks it
 opens the vault key, and stores it as `serverEncrypt(userKey, "user:<id>:recovery")`
 in `users.recoveryKeyEnc`. A reset link (`/reset-password#token`) returns it
 after the second factor, and the page wraps it under a new master password,
-as a backup code does. Turning email reset off deletes the copy.
+as a backup code does. Turning email reset off deletes the copy. Every
+account gets a link either way: the page can also start fresh
+(`/auth/reset/start-over`), where the client makes new keys and an empty vault
+and the server deletes the old vault and ends workspace memberships in the same
+transaction that spends the link.
 
 ```
 master password ──Argon2id(salt, m=64MiB, t=3, p=1)──► masterKey (32B, client only)

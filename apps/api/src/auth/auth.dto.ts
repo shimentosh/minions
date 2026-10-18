@@ -136,6 +136,21 @@ export class ResetCompleteDto extends ResetTokenDto {
   @ValidateNested() @Type(() => DeviceDto) device!: DeviceDto;
 }
 
+/**
+ * The other choice on the reset page: a fresh start on the same account. The
+ * client made new keys and an empty vault; the old vault is deleted.
+ */
+export class ResetStartOverDto extends ResetTokenDto {
+  /** Required when the account has two-factor sign-in: a TOTP or recovery code. */
+  @IsOptional() @IsString() @MinLength(6) @MaxLength(20) code?: string;
+  @IsUUID(4) vaultId!: string;
+  @IsBase64() @Length(44, 44) authKey!: string;
+  @ValidateNested() @Type(() => KdfDto) kdf!: KdfDto;
+  @Matches(ENVELOPE) @MaxLength(200) protectedUserKey!: string;
+  @Matches(ENVELOPE) @MaxLength(200) protectedVaultKey!: string;
+  @ValidateNested() @Type(() => DeviceDto) device!: DeviceDto;
+}
+
 export class RecoveryKeyDto {
   /** The raw user key, base64. Checked against the vault key before it is kept. */
   @IsBase64() @Length(44, 44) userKey!: string;

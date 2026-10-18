@@ -31,6 +31,7 @@ import { loadConfig } from "../config";
 import type { Prisma } from "../generated/prisma/client";
 import { Mailer } from "../mail/mailer";
 import { SessionsService } from "../sessions/sessions.service";
+import { revokeMembership } from "../workspaces/workspaces.service";
 import type {
   BackupCodesDto,
   ChangePasswordDto,
@@ -41,6 +42,7 @@ import type {
   RegisterDto,
   ResetCompleteDto,
   ResetOpenDto,
+  ResetStartOverDto,
 } from "./auth.dto";
 import { EmailVerificationService } from "./email-verification";
 
@@ -759,6 +761,16 @@ export class AuthService {
   // encrypted against the server: whoever has the server's key and database,
   // or the mailbox plus the second factor, can open it. Turning email reset
   // off in Settings deletes the server's copy; backup codes still work.
+  //
+  // Keeping the vault is optional. Every account gets a link, and the reset
+  // page also offers a fresh start: a new master password and an empty vault,
+  // with the old one deleted (startOver). Without a kept key that is the only
+  // way the link can help, so it works when email reset is off too.
+
+  /** Whether a reset link can keep this account's vault. */
+  private canKeepVault(user: { emailRecovery: boolean; recoveryKeyEnc: string | null }) {
+    return user.emailRecovery && !!user.recoveryKeyEnc;
+  }
 
   /**
    * Emails a reset link if the address has an account. The caller answers
@@ -776,41 +788,36 @@ export class AuthService {
     });
     if (recent) return;
     const token = newToken();
-    const ready = user.emailRecovery && !!user.recoveryKeyEnc;
     await this.prisma.$transaction([
       this.prisma.accountReset.deleteMany({ where: { userId: user.id, usedAt: null } }),
-      // Without a key to restore there is no link, but the row still starts the cooldown.
       this.prisma.accountReset.create({
         data: {
           userId: user.id,
           tokenHash: sha256(token),
-          expiresAt: new Date(Date.now() + (ready ? RESET_TTL_MS : 0)),
+          expiresAt: new Date(Date.now() + RESET_TTL_MS),
         },
       }),
     ]);
-    if (!ready) {
-      await this.mailer.send({
-        to: user.email,
-        subject: "Resetting your Minions master password",
-        text: [
-          "Someone asked to reset the master password for the Minions account at this address.",
-          "",
+    const choice = this.canKeepVault(user)
+      ? [
+          "To choose a new one, open this link. You can keep your vault, workspaces and shares as they are, or start fresh with an empty vault.",
+        ]
+      : [
           user.emailRecovery
-            ? "Email reset isn't ready for this account yet: it switches on the next time the vault is unlocked on any device."
-            : "Email reset is turned off for this account (Settings → Security), so a link can't reset it.",
+            ? "Email reset isn't ready for this account yet (it switches on the next time the vault is unlocked on any device), so this link can't keep your vault."
+            : "Email reset is turned off for this account (Settings → Security), so this link can't keep your vault.",
           "",
-          'If you have backup codes, open "Forgot password?" on the sign-in page and choose "Use a backup code". If you remember your master password, ignore this email.',
-        ].join("\n"),
-      });
-      return;
-    }
+          'It can still give you a fresh start: a new master password and an empty vault. Your old vault is deleted and you leave your workspaces. To keep your vault instead, use a backup code: open "Forgot password?" on the sign-in page and choose "Use a backup code".',
+          "",
+          "To start fresh, open this link:",
+        ];
     await this.mailer.send({
       to: user.email,
       subject: "Reset your Minions master password",
       text: [
         "Someone asked to reset the master password for the Minions account at this address.",
         "",
-        "To choose a new one, open this link. Your vault, workspaces and shares stay as they are.",
+        ...choice,
         "",
         `${loadConfig().mail.publicWebUrl}/reset-password#${token}`,
         "",
@@ -831,7 +838,12 @@ export class AuthService {
   /** What the reset page needs before the person chooses a new master password. */
   async checkReset(token: string) {
     const { user } = await this.resetRow(token);
-    return { email: user.email, twoFactorRequired: user.twoFactorEnabled };
+    return {
+      email: user.email,
+      userId: user.id,
+      twoFactorRequired: user.twoFactorEnabled,
+      canKeepVault: this.canKeepVault(user),
+    };
   }
 
   /**
@@ -844,7 +856,8 @@ export class AuthService {
     const user = row.user;
     if (!user.emailRecovery || !user.recoveryKeyEnc)
       throw new BadRequestException({
-        message: "Email reset is off for this account. Use a backup code instead.",
+        message:
+          "This link can't keep the vault: email reset is off for this account. Start fresh, or use a backup code instead.",
         code: "EMAIL_RESET_OFF",
       });
     await this.checkRecoverySecondFactor(user, dto.code, client);
@@ -899,6 +912,148 @@ export class AuthService {
       })
       .catch(() => undefined);
     return outcome;
+  }
+
+  /**
+   * The other choice on the reset page, and the only one when the server
+   * keeps no user key: a fresh start on the same account. The client made new
+   * keys; everything the old ones protected is deleted in the same transaction
+   * that uses up the link. Two-factor sign-in stays as it was.
+   */
+  async startOver(dto: ResetStartOverDto, client: ClientInfo): Promise<AuthOutcome> {
+    const row = await this.resetRow(dto.token);
+    const user = row.user;
+    await this.checkRecoverySecondFactor(user, dto.code, client);
+    const authHash = await hash(dto.authKey, ARGON);
+    const { fresh, vault, summary } = await this.prisma.$transaction(
+      async (tx) => {
+        // One conditional UPDATE: a link works once, even if submitted twice at the same time.
+        const used = await tx.accountReset.updateMany({
+          where: { id: row.id, usedAt: null, expiresAt: { gt: new Date() } },
+          data: { usedAt: new Date() },
+        });
+        if (used.count !== 1) throw badResetLink();
+        const summary = await this.wipeAccount(tx, user.id);
+        const fresh = await tx.user.update({
+          where: { id: user.id },
+          data: {
+            // Opening the link proved the address.
+            emailVerifiedAt: user.emailVerifiedAt ?? new Date(),
+            authHash,
+            kdfMemory: dto.kdf.memory,
+            kdfIterations: dto.kdf.iterations,
+            kdfParallelism: dto.kdf.parallelism,
+            kdfSalt: dto.kdf.salt,
+            protectedUserKey: dto.protectedUserKey,
+            publicKey: null,
+            protectedPrivateKey: null,
+            // The kept key opened the old vault only; the client hands over the new one.
+            recoveryKeyEnc: null,
+            failedLoginCount: 0,
+            lockedUntil: null,
+            previousVisitAt: null,
+            lastVisitAt: new Date(),
+          },
+        });
+        const vault = await tx.vault.create({
+          data: {
+            id: dto.vaultId,
+            userId: user.id,
+            protectedKey: dto.protectedVaultKey,
+            ...(user.vaults[0] ? { name: user.vaults[0].name } : {}),
+          },
+        });
+        return { fresh, vault, summary };
+      },
+      { timeout: 60_000 },
+    );
+    const device = await this.sessions.upsertDevice(user.id, dto.device, client);
+    const { token, id } = await this.sessions.create(
+      user.id,
+      device.id,
+      "ACTIVE",
+      client,
+      fresh.autoLockMinutes,
+    );
+    const actor = { userId: user.id, deviceId: device.id, sessionId: id, ...client };
+    await this.activity.log(actor, "auth.account_reset");
+    await this.activity.securityEvent(actor, "account_reset", "critical", {
+      count: summary.workspacesLeft,
+    });
+    await this.mailer
+      .send({
+        to: user.email,
+        subject: "Your Minions account was reset",
+        text: [
+          "A reset link was used to start your Minions account over with a new master password. The old vault was deleted, you left your workspaces, and every other device was signed out.",
+          "",
+          "If you did not do this, someone can read your email. Secure your email account first, then reset your Minions master password again from the sign-in page.",
+        ].join("\n"),
+      })
+      .catch(() => undefined);
+    return this.outcome(dto.device, token, { status: "ok", keys: this.keysFor(fresh, vault) });
+  }
+
+  /**
+   * Deletes everything the old keys protected: the personal vault and all it
+   * holds, share links, people shares both ways, backup codes, sessions,
+   * devices, the sharing key pair's data, and the personal activity history.
+   * The account keeps its id, email, name, settings and second factors.
+   * Workspace memberships end as if the person had left; a workspace they own
+   * passes to its longest-standing confirmed admin (or member), or is deleted
+   * when nobody else is in it.
+   */
+  private async wipeAccount(tx: Prisma.TransactionClient, userId: string) {
+    const memberships = await tx.workspaceMember.findMany({
+      where: { userId },
+      include: { workspace: { select: { id: true, vaultId: true } } },
+    });
+    let workspacesDeleted = 0;
+    for (const m of memberships) {
+      if (m.role === "OWNER") {
+        const successor = await tx.workspaceMember.findFirst({
+          where: { workspaceId: m.workspaceId, status: "CONFIRMED", userId: { not: userId } },
+          // Role order is OWNER, ADMIN, MEMBER: admins first.
+          orderBy: [{ role: "asc" }, { confirmedAt: "asc" }],
+        });
+        if (!successor) {
+          // The vault cascades to the workspace, its members, items, grants and folders.
+          await tx.vault.delete({ where: { id: m.workspace.vaultId } });
+          workspacesDeleted++;
+          continue;
+        }
+        await revokeMembership(tx, m.workspace, m);
+        await tx.workspaceMember.update({ where: { id: successor.id }, data: { role: "OWNER" } });
+      } else {
+        await revokeMembership(tx, m.workspace, m);
+      }
+    }
+
+    const vaultIds = (await tx.vault.findMany({ where: { userId }, select: { id: true } })).map(
+      (v) => v.id,
+    );
+    const inVaults = { vaultId: { in: vaultIds } };
+    await tx.share.deleteMany({ where: { userId } });
+    await tx.itemShare.deleteMany({
+      where: { OR: [{ ownerId: userId }, { recipientId: userId }] },
+    });
+    await tx.securityFindingState.deleteMany({ where: inVaults });
+    await tx.securityFindingRecord.deleteMany({ where: inVaults });
+    await tx.securitySnapshot.deleteMany({ where: inVaults });
+    // Items, fields, versions, notes, projects, collections and tags cascade.
+    await tx.vault.deleteMany({ where: { userId } });
+    await tx.importJob.deleteMany({ where: { userId } });
+    await tx.aiClassification.deleteMany({ where: { userId } });
+    await tx.userClassificationPreference.deleteMany({ where: { userId } });
+    await tx.session.deleteMany({ where: { userId } });
+    await tx.device.deleteMany({ where: { userId } });
+    // They wrap the old user key, so they could not open the new vault.
+    await tx.backupCode.deleteMany({ where: { userId } });
+    await tx.accountReset.deleteMany({ where: { userId, usedAt: null } });
+    // Workspace audit entries stay: they belong to the workspace's history.
+    await tx.activityLog.deleteMany({ where: { userId, workspaceId: null } });
+    await tx.securityEvent.deleteMany({ where: { userId } });
+    return { workspacesLeft: memberships.length - workspacesDeleted, workspacesDeleted };
   }
 
   /** The submitted key must open this account's personal vault key before the server keeps it. */

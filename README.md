@@ -229,9 +229,11 @@ only yourself to be able to open the vault.
 **What happens if I forget my master password?**
 Choose "Forgot password?" on the sign-in screen and we email you a link. Open it, choose a
 new master password, and your vault, workspaces and shares stay exactly as they were.
-**Backup codes** (Settings → Security) do the same without email: keep them somewhere safe,
-such as on paper, for when email reset is off or your mailbox is out of reach. With email
-reset off and no backup code, the vault cannot be opened again.
+Keeping them is optional: the same page can **start fresh** instead, with a new master
+password and an empty vault (the old vault is deleted and you leave your workspaces).
+**Backup codes** (Settings → Security) keep the vault without email: keep them somewhere
+safe, such as on paper, for when email reset is off or your mailbox is out of reach. With
+email reset off and no backup code, the link can only start fresh.
 
 **Does the AI see my passwords?**
 No. AI organizing is optional and off without an API key. It only receives names and
