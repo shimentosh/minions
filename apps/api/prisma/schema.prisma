@@ -43,6 +43,10 @@ model User {
   twoFactorSecretEnc  String?
   /// Last accepted TOTP time step, so a code cannot be replayed within its window.
   lastTotpStep        Int?
+  /// Email reset: when on, the server keeps the user key (below) so a reset link restores the vault.
+  emailRecovery       Boolean   @default(true)
+  /// The user key, encrypted with SERVER_ENCRYPTION_KEY. Null when email reset is off or not set up yet.
+  recoveryKeyEnc      String?
   failedLoginCount    Int       @default(0)
   lockedUntil         DateTime?
   autoLockMinutes     Int       @default(15)
@@ -57,6 +61,7 @@ model User {
   recoveryCodes       RecoveryCode[]
   emailVerifications  EmailVerification[]
   backupCodes         BackupCode[]
+  accountResets       AccountReset[]
   webauthnCredentials WebauthnCredential[]
   devices             Device[]
   sessions            Session[]
@@ -87,6 +92,22 @@ model EmailVerification {
 
   @@index([userId])
   @@map("email_verifications")
+}
+
+/// Single-use links for a forgotten master password. Only the SHA-256 of the token is stored.
+/// openedAt is set once the link (and the second factor) is checked and the user key handed back.
+model AccountReset {
+  id        String    @id @default(uuid()) @db.Uuid
+  userId    String    @db.Uuid
+  tokenHash String    @unique
+  expiresAt DateTime
+  openedAt  DateTime?
+  usedAt    DateTime?
+  createdAt DateTime  @default(now())
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("account_resets")
 }
 
 /// Backup codes for a forgotten master password, made on the client. Each
