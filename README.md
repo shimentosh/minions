@@ -222,11 +222,11 @@ which is never sent. The server can see some metadata, such as item names and we
 see [what the server can see](ARCHITECTURE.md#what-the-server-can-see-safe-metadata).
 
 **What happens if I forget my master password?**
-Your vault cannot be recovered, not even by the server owner. That is the price of
-end-to-end encryption, and an encrypted backup is locked by the same password. "Forgot
-password?" on the sign-in screen emails a link that resets your account: you choose a new
-master password and start again with an empty vault on the same email. Store your master
-password somewhere safe.
+Nobody can recover it, not even the server owner: that is the price of end-to-end
+encryption. Make **backup codes** in Settings → Security and keep them somewhere safe,
+such as on paper. With one, "Forgot password?" on the sign-in screen lets you set a new
+master password, and your vault, workspaces and shares stay exactly as they were.
+Without one, the vault cannot be opened again.
 
 **Does the AI see my passwords?**
 No. AI organizing is optional and off without an API key. It only receives names and

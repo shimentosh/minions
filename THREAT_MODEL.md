@@ -142,21 +142,22 @@ limit. They are listed so nobody mistakes them for solved.
 
 - **Forgotten master password:** the vault cannot be recovered, by design.
   Nobody, including the server operator, can decrypt it. 2FA recovery codes
-  recover the *second factor* only, not the vault. What the person can do is
-  **reset the account** ("Forgot password?" on the sign-in and lock screens):
-  a single-use link (token in the URL fragment, SHA-256 stored, 1 h, not
-  re-sent within 2 minutes) proves the email; the client makes new keys as at
-  sign-up; one transaction then deletes the personal vault and everything in
-  it, share links, people shares both ways, sessions, devices, passkeys, 2FA,
-  the sharing key pair and the personal activity history, and ends workspace
-  memberships as a removal would (items flagged for re-keying, items only they
-  could open deleted). A workspace they own passes to its longest-standing
-  confirmed admin, else member, or is deleted if they were alone in it. The
-  link opens nothing of the old vault, so someone who controls the mailbox can
-  destroy the account but not read it; with 2FA on, the reset also needs a
-  TOTP or recovery code, counted against the lockout. The request endpoint
-  answers before doing any work, so neither its body nor its timing reveals
-  whether an account exists. Tested in `account-reset.test.ts`.
+  recover the *second factor* only, not the vault. **Backup codes** recover
+  the vault: the client makes 8 codes of 100 random bits each, and for each
+  one wraps the user key with an HKDF-derived key and sends a separate
+  HKDF-derived proof. The server stores the wrapped key and the SHA-256 of
+  the proof, so it can check a code but never open the key. "Forgot
+  password?" (sign-in and lock screens) takes the email and a code, opens the
+  user key on the device and wraps it under a new master password. Nothing
+  is re-encrypted or deleted: the vault, workspace memberships, shares and
+  the sharing key pair stay. The code is spent atomically, other sessions
+  are revoked, and the account is emailed. With 2FA on, recovery also needs a
+  TOTP or 2FA recovery code, counted against the lockout; accounts are
+  not asked for a passkey here, so for them a backup code alone is enough. Wrong backup codes are not counted
+  (they cannot be guessed), and a wrong code, a used one and an unknown email
+  get the same answer. Anyone holding a backup code can take over the
+  account, so the screen tells the person to keep codes offline. Without a
+  code nothing can be recovered. Tested in `backup-codes.test.ts`.
 - **New device:** sign in with email, master password and 2FA; the client
   derives the keys locally. The server raises a `new_device` security event.
 - **Lost device:** revoke it under Devices (ends its sessions immediately), or

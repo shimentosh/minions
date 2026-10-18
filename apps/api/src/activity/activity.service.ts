@@ -28,7 +28,7 @@ export const ACTIONS = [
   "auth.logout",
   "auth.login_failed",
   "auth.registered",
-  "auth.account_reset",
+  "auth.password_recovered",
   "device.added",
   "device.linked",
   "device.revoked",
@@ -84,7 +84,8 @@ export const SECURITY_EVENTS = [
   "vault_key_rotation_started",
   "vault_key_rotated",
   "email_verified",
-  "account_reset",
+  "backup_codes_created",
+  "master_password_recovered",
 ] as const;
 export type SecurityEventType = (typeof SECURITY_EVENTS)[number];
 

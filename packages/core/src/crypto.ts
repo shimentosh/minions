@@ -1,5 +1,5 @@
 import { argon2id } from "hash-wasm";
-import { fromBase64, fromUtf8, toBase64, toHex, utf8 } from "./encoding";
+import { base32Encode, fromBase64, fromUtf8, toBase64, toHex, utf8 } from "./encoding";
 
 /**
  * Client-side vault cryptography. See ARCHITECTURE.md §1.
@@ -180,6 +180,7 @@ export async function decryptString(
 
 export const aad = {
   userKey: (userId: string) => `user:${userId}:key`,
+  backupUserKey: (userId: string) => `user:${userId}:key:backup`,
   vaultKey: (vaultId: string) => `vault:${vaultId}:key`,
   field: (itemId: string, fieldKey: string) => `item:${itemId}:field:${fieldKey}`,
   note: (noteId: string) => `note:${noteId}:content`,
@@ -245,4 +246,79 @@ export async function createAccountKeys(
   const protectedVaultKey = await wrapKey(userKey, vaultKey, aad.vaultKey(vaultId));
   stretchedKey.fill(0);
   return { kdf, authKey, protectedUserKey, protectedVaultKey, userKey, vaultKey };
+}
+
+// ─── Backup codes (forgotten master password) ────────────────────────────────
+//
+// Each code is 100 random bits made on the client. One half of what it
+// derives proves the code to the server (which stores only its SHA-256); the
+// other wraps the user key, so a code opens the same vault the master
+// password does and a new password can be set without losing anything.
+// The codes are unguessable, so a fast KDF is enough.
+
+export const BACKUP_CODE_COUNT = 8;
+const BACKUP_CODE_CHARS = 20;
+
+/** Lowercase, without spaces or dashes; null if it cannot be a backup code. */
+export function normalizeBackupCode(code: string): string | null {
+  const clean = code.toLowerCase().replace(/[\s-]/g, "");
+  return /^[a-z2-7]{20}$/.test(clean) ? clean : null;
+}
+
+export async function backupCodeKeys(
+  code: string,
+): Promise<{ proof: string; wrappingKey: Uint8Array<ArrayBuffer> }> {
+  const clean = normalizeBackupCode(code);
+  if (!clean) throw new Error("Invalid backup code");
+  const raw = utf8(clean);
+  const [proof, wrappingKey] = await Promise.all([
+    hkdf(raw, "minions/backup-proof"),
+    hkdf(raw, "minions/backup-enc"),
+  ]);
+  return { proof: toBase64(proof), wrappingKey };
+}
+
+export interface BackupCodeSet {
+  /** Shown once, as xxxxx-xxxxx-xxxxx-xxxxx. */
+  codes: string[];
+  /** Sent to the server: the proof and the user key wrapped by each code. */
+  entries: { proof: string; protectedUserKey: string }[];
+}
+
+export async function createBackupCodes(
+  userKey: Uint8Array<ArrayBuffer>,
+  userId: string,
+  count = BACKUP_CODE_COUNT,
+): Promise<BackupCodeSet> {
+  const codes: string[] = [];
+  const entries: BackupCodeSet["entries"] = [];
+  for (let i = 0; i < count; i++) {
+    const raw = base32Encode(randomBytes(13)).toLowerCase().slice(0, BACKUP_CODE_CHARS);
+    const code = raw.match(/.{5}/g)!.join("-");
+    const { proof, wrappingKey } = await backupCodeKeys(code);
+    try {
+      entries.push({
+        proof,
+        protectedUserKey: await wrapKey(wrappingKey, userKey, aad.backupUserKey(userId)),
+      });
+    } finally {
+      wrappingKey.fill(0);
+    }
+    codes.push(code);
+  }
+  return { codes, entries };
+}
+
+/** Opens the user key with a backup code. Throws DecryptionError if the code does not fit. */
+export async function unwrapWithBackupCode(
+  code: string,
+  protectedUserKey: string,
+  userId: string,
+): Promise<Uint8Array<ArrayBuffer>> {
+  const { wrappingKey } = await backupCodeKeys(code);
+  try {
+    return await unwrapKey(wrappingKey, protectedUserKey, aad.backupUserKey(userId));
+  } finally {
+    wrappingKey.fill(0);
+  }
 }

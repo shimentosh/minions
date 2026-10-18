@@ -1,6 +1,7 @@
 import {
   type AuthResult,
   aad,
+  backupCodeKeys,
   createAccountKeys,
   decryptBytes,
   deriveMasterKeys,
@@ -9,11 +10,13 @@ import {
   generateUserKeyPair,
   importPrivateKey,
   type MeResponse,
+  newKdfParams,
   openPrivateKey,
   protectPrivateKey,
   toBase64,
   unwrapKey,
   unwrapPrivateKeyBytes,
+  unwrapWithBackupCode,
   type VaultKeys,
   wipe,
   wrapKey,
@@ -154,8 +157,13 @@ interface SessionState {
   twoFactorMethods: ("totp" | "passkey")[];
   refresh: () => Promise<void>;
   register: (input: { email: string; name: string; password: string }) => Promise<void>;
-  /** Forgotten master password: a fresh, empty vault on the same account (see the reset email). */
-  resetAccount: (input: { token: string; password: string; code?: string }) => Promise<void>;
+  /** Forgotten master password: a backup code opens the vault, which gets a new master password. */
+  recover: (input: {
+    email: string;
+    backupCode: string;
+    password: string;
+    code?: string;
+  }) => Promise<void>;
   login: (input: { email: string; password: string }) => Promise<"ok" | "two_factor_required">;
   verifyTwoFactor: (code: string) => Promise<void>;
   verifyPasskey: () => Promise<void>;
@@ -279,7 +287,7 @@ async function openAfterSecondFactor(result: AuthResult) {
   }
 }
 
-/** After sign-up or an account reset: the keys were just made here, so no unwrapping. */
+/** After sign-up: the keys were just made here, so no unwrapping. */
 async function openFreshVault(
   result: AuthResult,
   keys: Awaited<ReturnType<typeof createAccountKeys>>,
@@ -303,6 +311,16 @@ async function openFreshVault(
   } finally {
     wipe(keys.userKey);
   }
+}
+
+/** Checks a backup code for this email before a new master password is chosen. */
+export async function checkBackupCode(email: string, backupCode: string) {
+  const { proof } = await backupCodeKeys(backupCode);
+  const r = await post<{ userId: string; protectedUserKey: string; twoFactorRequired: boolean }>(
+    "/auth/recover/check",
+    { email, proof },
+  );
+  return { proof, ...r };
 }
 
 export const useSession = create<SessionState>((set, getState) => ({
@@ -342,27 +360,33 @@ export const useSession = create<SessionState>((set, getState) => ({
     await getState().refresh();
   },
 
-  async resetAccount({ token, password, code }) {
-    const { userId } = await post<{ userId: string }>("/auth/reset/check", { token });
-    // A new vault id: nothing encrypted for the old vault can be mistaken for the new one.
-    const vaultId = crypto.randomUUID();
-    const keys = await createAccountKeys(password, userId, vaultId);
-    const result = await post<AuthResult>("/auth/reset/complete", {
-      token,
-      ...(code ? { code } : {}),
-      vaultId,
-      authKey: keys.authKey,
-      kdf: keys.kdf,
-      protectedUserKey: keys.protectedUserKey,
-      protectedVaultKey: keys.protectedVaultKey,
-      device: deviceInfo(),
-    }).catch((e) => {
-      wipe(keys.vaultKey);
-      wipe(keys.userKey);
-      throw e;
-    });
-    closeVault();
-    await openFreshVault(result, keys, userId, vaultId);
+  async recover({ email, backupCode, password, code }) {
+    const { proof, userId, protectedUserKey } = await checkBackupCode(email, backupCode);
+    // The code opens the same user key the old password did, so the vault,
+    // workspaces and shares are untouched; only its wrapping changes.
+    const userKey = await unwrapWithBackupCode(backupCode, protectedUserKey, userId);
+    const kdf = newKdfParams();
+    const { authKey, stretchedKey } = await deriveMasterKeys(password, kdf);
+    try {
+      const result = await post<AuthResult>("/auth/recover/complete", {
+        email,
+        proof,
+        ...(code ? { code } : {}),
+        authKey,
+        kdf,
+        protectedUserKey: await wrapKey(stretchedKey, userKey, aad.userKey(userId)),
+        device: deviceInfo(),
+      });
+      if (result.token) {
+        setBearerToken(result.token);
+        rememberDesktopSession(result.token);
+      }
+      closeVault();
+      await openVault(stretchedKey, result.keys!);
+    } finally {
+      wipe(userKey);
+      wipe(stretchedKey);
+    }
     await getState().refresh();
   },
 

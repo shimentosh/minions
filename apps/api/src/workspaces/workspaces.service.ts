@@ -60,63 +60,6 @@ function emailNotVerified(message: string) {
   return new ForbiddenException({ message, code: "EMAIL_NOT_VERIFIED" });
 }
 
-/**
- * Ends a membership: the server stops serving the member anything at once.
- * Keys they held cannot be taken back, so every item they could open is
- * flagged for re-keying, and so is the workspace key if they had it. Items
- * only they could open are deleted, since nobody else holds a key for them;
- * items left without a manager hand MANAGE to the people who still hold them.
- * Runs inside the caller's transaction (removal, leaving, account reset).
- */
-export async function revokeMembership(
-  tx: Prisma.TransactionClient,
-  workspace: { id: string; vaultId: string },
-  t: { id: string; userId: string | null; status: string },
-): Promise<{ deleted: number; flagged: number }> {
-  const vaultId = workspace.vaultId;
-  await tx.workspaceMember.delete({ where: { id: t.id } });
-  if (!t.userId) return { deleted: 0, flagged: 0 };
-  const userId = t.userId;
-  const granted = await tx.workspaceItemGrant.findMany({
-    where: { workspaceId: workspace.id, userId },
-    select: { itemId: true },
-  });
-  const itemIds = granted.map((g) => g.itemId);
-  await tx.workspaceItemGrant.deleteMany({ where: { workspaceId: workspace.id, userId } });
-  await tx.workspaceItemFavorite.deleteMany({ where: { userId, item: { vaultId } } });
-
-  const items = await tx.vaultItem.findMany({
-    where: { id: { in: itemIds } },
-    select: { id: true, workspaceShared: true, grants: { select: { permission: true } } },
-  });
-  const orphans = items.filter((i) => !i.workspaceShared && i.grants.length === 0);
-  const leaderless = items.filter(
-    (i) =>
-      !i.workspaceShared && i.grants.length > 0 && !i.grants.some((g) => g.permission === "MANAGE"),
-  );
-  if (orphans.length)
-    await tx.vaultItem.deleteMany({ where: { id: { in: orphans.map((o) => o.id) } } });
-  if (leaderless.length)
-    await tx.workspaceItemGrant.updateMany({
-      where: { itemId: { in: leaderless.map((i) => i.id) } },
-      data: { permission: "MANAGE" },
-    });
-  const hadWorkspaceKey = t.status === "CONFIRMED";
-  const flagged = await tx.vaultItem.updateMany({
-    where: {
-      vaultId,
-      OR: [
-        { id: { in: itemIds.filter((id) => !orphans.some((o) => o.id === id)) } },
-        ...(hadWorkspaceKey ? [{ workspaceShared: true }] : []),
-      ],
-    },
-    data: { rekeyNeeded: true },
-  });
-  if (hadWorkspaceKey)
-    await tx.workspace.update({ where: { id: workspace.id }, data: { rekeyNeeded: true } });
-  return { deleted: orphans.length, flagged: flagged.count };
-}
-
 @Injectable()
 export class WorkspacesService {
   constructor(
@@ -471,9 +414,61 @@ export class WorkspacesService {
     return result;
   }
 
-  /** Ends a membership in one transaction; see revokeMembership. */
+  /**
+   * Ends a membership in one transaction: the server stops serving the
+   * member anything at once. Keys they held cannot be taken back, so every
+   * item they could open is flagged for re-keying, and so is the workspace
+   * key if they had it. Items only they could open are deleted, since nobody
+   * else holds a key for them; items left without a manager hand MANAGE to
+   * the people who still hold them.
+   */
   private async revoke(m: Membership, t: { id: string; userId: string | null; status: string }) {
-    return this.prisma.$transaction((tx) => revokeMembership(tx, m.workspace, t));
+    const vaultId = m.workspace.vaultId;
+    return this.prisma.$transaction(async (tx) => {
+      await tx.workspaceMember.delete({ where: { id: t.id } });
+      if (!t.userId) return { deleted: 0, flagged: 0 };
+      const userId = t.userId;
+      const granted = await tx.workspaceItemGrant.findMany({
+        where: { workspaceId: m.workspace.id, userId },
+        select: { itemId: true },
+      });
+      const itemIds = granted.map((g) => g.itemId);
+      await tx.workspaceItemGrant.deleteMany({ where: { workspaceId: m.workspace.id, userId } });
+      await tx.workspaceItemFavorite.deleteMany({ where: { userId, item: { vaultId } } });
+
+      const items = await tx.vaultItem.findMany({
+        where: { id: { in: itemIds } },
+        select: { id: true, workspaceShared: true, grants: { select: { permission: true } } },
+      });
+      const orphans = items.filter((i) => !i.workspaceShared && i.grants.length === 0);
+      const leaderless = items.filter(
+        (i) =>
+          !i.workspaceShared &&
+          i.grants.length > 0 &&
+          !i.grants.some((g) => g.permission === "MANAGE"),
+      );
+      if (orphans.length)
+        await tx.vaultItem.deleteMany({ where: { id: { in: orphans.map((o) => o.id) } } });
+      if (leaderless.length)
+        await tx.workspaceItemGrant.updateMany({
+          where: { itemId: { in: leaderless.map((i) => i.id) } },
+          data: { permission: "MANAGE" },
+        });
+      const hadWorkspaceKey = t.status === "CONFIRMED";
+      const flagged = await tx.vaultItem.updateMany({
+        where: {
+          vaultId,
+          OR: [
+            { id: { in: itemIds.filter((id) => !orphans.some((o) => o.id === id)) } },
+            ...(hadWorkspaceKey ? [{ workspaceShared: true }] : []),
+          ],
+        },
+        data: { rekeyNeeded: true },
+      });
+      if (hadWorkspaceKey)
+        await tx.workspace.update({ where: { id: m.workspace.id }, data: { rekeyNeeded: true } });
+      return { deleted: orphans.length, flagged: flagged.count };
+    });
   }
 
   /**

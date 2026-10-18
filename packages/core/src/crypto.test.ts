@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
   aad,
+  backupCodeKeys,
   createAccountKeys,
+  createBackupCodes,
   DecryptionError,
   decryptString,
   deriveMasterKeys,
@@ -9,8 +11,10 @@ import {
   generateKey,
   isEnvelope,
   type KdfParams,
+  normalizeBackupCode,
   secretFingerprint,
   unwrapKey,
+  unwrapWithBackupCode,
 } from "./crypto";
 import { fromBase64, toBase64 } from "./encoding";
 
@@ -105,5 +109,39 @@ describe("key hierarchy", () => {
     expect(await secretFingerprint(k1, "pw")).toBe(await secretFingerprint(k1, "pw"));
     expect(await secretFingerprint(k1, "pw")).not.toBe(await secretFingerprint(k2, "pw"));
     expect(await secretFingerprint(k1, "pw")).toMatch(/^[0-9a-f]{64}$/);
+  });
+});
+
+describe("backup codes", () => {
+  it("each code opens the user key, and nothing else does", async () => {
+    const userKey = generateKey();
+    const set = await createBackupCodes(userKey, "u1");
+    expect(set.codes).toHaveLength(8);
+    expect(new Set(set.codes).size).toBe(8);
+    for (const code of set.codes) expect(code).toMatch(/^[a-z2-7]{5}(-[a-z2-7]{5}){3}$/);
+
+    const [first] = set.codes;
+    const opened = await unwrapWithBackupCode(
+      first!.toUpperCase().replace(/-/g, " "),
+      set.entries[0]!.protectedUserKey,
+      "u1",
+    );
+    expect(toBase64(opened)).toBe(toBase64(userKey));
+    // Bound to its own entry and to the user.
+    await expect(
+      unwrapWithBackupCode(set.codes[1]!, set.entries[0]!.protectedUserKey, "u1"),
+    ).rejects.toBeInstanceOf(DecryptionError);
+    await expect(
+      unwrapWithBackupCode(first!, set.entries[0]!.protectedUserKey, "u2"),
+    ).rejects.toBeInstanceOf(DecryptionError);
+  });
+
+  it("the proof sent to the server is not the wrapping key", async () => {
+    const { codes, entries } = await createBackupCodes(generateKey(), "u1", 1);
+    const keys = await backupCodeKeys(codes[0]!);
+    expect(keys.proof).toBe(entries[0]!.proof);
+    expect(keys.proof).not.toBe(toBase64(keys.wrappingKey));
+    expect(normalizeBackupCode("abcde-fghij")).toBeNull();
+    expect(normalizeBackupCode("ABCDE fghij klmno pqrs7")).toBe("abcdefghijklmnopqrs7");
   });
 });

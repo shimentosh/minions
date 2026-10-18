@@ -1,5 +1,6 @@
 import {
   aad,
+  createBackupCodes,
   deriveMasterKeys,
   estimateStrength,
   newKdfParams,
@@ -73,13 +74,18 @@ function Row({
   );
 }
 
-function RecoveryCodes({ codes, onDone }: { codes: string[]; onDone: () => void }) {
+function RecoveryCodes({
+  codes,
+  onDone,
+  children = "Save these recovery codes somewhere safe outside Minions. Each works once if you lose your authenticator. They won't be shown again.",
+}: {
+  codes: string[];
+  onDone: () => void;
+  children?: React.ReactNode;
+}) {
   return (
     <div className="space-y-3 rounded-lg border border-warning/40 bg-warning/5 p-3">
-      <p className="text-sm">
-        Save these recovery codes somewhere safe outside Minions. Each works once if you lose your
-        authenticator. They won't be shown again.
-      </p>
+      <p className="text-sm">{children}</p>
       <div className="grid grid-cols-2 gap-1 font-mono text-sm">
         {codes.map((c) => (
           <span key={c}>{c}</span>
@@ -511,6 +517,118 @@ function RestoreBackup() {
   );
 }
 
+/**
+ * Backup codes for a forgotten master password. Each wraps the user key on
+ * this device, so using one sets a new password and keeps the whole vault.
+ */
+function BackupCodesSection() {
+  const status = useQuery({
+    queryKey: ["backup-codes"],
+    queryFn: () =>
+      get<{ total: number; remaining: number; createdAt: string | null }>("/auth/backup-codes"),
+  });
+  const [open, setOpen] = useState(false);
+  const [password, setPassword] = useState("");
+  const [codes, setCodes] = useState<string[] | null>(null);
+  const make = useMutation({
+    mutationFn: async () => {
+      const keys = await get<VaultKeys>("/vault/keys");
+      const { authKey, stretchedKey } = await deriveMasterKeys(password, keys.kdf);
+      let userKey: Uint8Array<ArrayBuffer> | null = null;
+      try {
+        userKey = await unwrapKey(stretchedKey, keys.protectedUserKey, aad.userKey(keys.userId));
+        const set = await createBackupCodes(userKey, keys.userId);
+        await post("/auth/backup-codes", { authKey, codes: set.entries });
+        return set.codes;
+      } finally {
+        wipe(userKey);
+        wipe(stretchedKey);
+      }
+    },
+    onSuccess: (c) => {
+      setCodes(c);
+      setOpen(false);
+      setPassword("");
+      void status.refetch();
+    },
+    onError: (e) =>
+      toast.error(
+        e instanceof Error && e.name === "DecryptionError"
+          ? "Master password is incorrect"
+          : errorMessage(e),
+      ),
+  });
+  const total = status.data?.total ?? 0;
+  const remaining = status.data?.remaining ?? 0;
+
+  return (
+    <Section
+      title="Backup codes"
+      hint="Forgot your master password? A backup code lets you set a new one and keep everything in your vault."
+    >
+      {codes && (
+        <RecoveryCodes codes={codes} onDone={() => setCodes(null)}>
+          Save these backup codes somewhere safe outside Minions, such as on paper. Each works once
+          to set a new master password. Anyone with one can open your vault, and they won't be shown
+          again.
+        </RecoveryCodes>
+      )}
+      <Row
+        label="Status"
+        hint={
+          !status.data
+            ? "…"
+            : total
+              ? `${remaining} of ${total} left`
+              : "Not set up. Without them, a forgotten master password can't be undone."
+        }
+      >
+        <div className="flex items-center gap-1.5">
+          {status.data && !remaining && (
+            <Badge variant="warning">
+              <ShieldAlert className="size-3" /> {total ? "None left" : "Off"}
+            </Badge>
+          )}
+          {!open && (
+            <Button size="xs" variant={total ? "outline" : "default"} onClick={() => setOpen(true)}>
+              {total ? "New backup codes" : "Create backup codes"}
+            </Button>
+          )}
+        </div>
+      </Row>
+      {open && (
+        <div className="grid gap-2 sm:grid-cols-3">
+          <PasswordInput
+            id="backup-pw"
+            value={password}
+            onChange={setPassword}
+            placeholder="Master password"
+            autoComplete="current-password"
+          />
+          <div className="flex gap-1.5">
+            <Button
+              size="sm"
+              loading={make.isPending}
+              disabled={!password}
+              onClick={() => make.mutate()}
+            >
+              {total ? "Replace codes" : "Create"}
+            </Button>
+            <Button size="sm" variant="ghost" onClick={() => setOpen(false)}>
+              Cancel
+            </Button>
+          </div>
+          {total > 0 && (
+            <p className="text-muted-foreground text-xs sm:col-span-3">
+              Your old backup codes stop working.
+            </p>
+          )}
+        </div>
+      )}
+    </Section>
+  );
+}
+
 function MasterPasswordSection() {
   const [current, setCurrent] = useState("");
   const [next, setNext] = useState("");
@@ -556,7 +674,7 @@ function MasterPasswordSection() {
   return (
     <Section
       title="Master password"
-      hint="Changing it signs out every other device. It cannot be recovered if forgotten."
+      hint="Changing it signs out every other device. If you forget it, only a backup code gets you back in."
     >
       <div className="grid gap-3 sm:grid-cols-3">
         <div className="space-y-1.5">
@@ -821,6 +939,7 @@ export function SettingsPage() {
             <TwoFactorSection />
             <PasskeysSection />
             <MasterPasswordSection />
+            <BackupCodesSection />
             <VaultKeySection />
           </>
         )}

@@ -73,9 +73,10 @@ login(email, authKey, device) → session (state PENDING_2FA if 2FA on)
 vault/kdf → kdf params (all a locked session gets)
 vault/unlock(authKey) → wrapped keys; session.vault_unlocked_until = now + autoLock
 
-reset/request(email) → 202, always; link mailed if the account exists
-reset/check(token) → email, userId, whether 2FA is needed
-reset/complete(token, [code], new keys, device) → old vault deleted, session ACTIVE
+backup-codes(authKey, [proof, user key wrapped by the code]) → replaces the set
+recover/check(email, proof) → userId, user key wrapped by the code, whether 2FA is needed
+recover/complete(email, proof, [code], new authKey, kdf, re-wrapped user key, device)
+  → code spent, other sessions revoked, session ACTIVE; the vault is unchanged
 ```
 
 * Session tokens: 256-bit random, only the SHA-256 is stored. Web uses an
@@ -86,8 +87,10 @@ reset/complete(token, [code], new keys, device) → old vault deleted, session A
   bounded by the user's auto-lock setting. The client also wipes its keys on lock.
 * Brute force: global throttling, stricter throttles on auth routes, and one
   per-account failure counter (atomic increment) fed by wrong master passwords
-  at sign-in and unlock and by wrong TOTP codes or passkeys. From the fifth
-  failure the account locks for 1, 2, 4… up to 60 minutes. The counter is
+  at sign-in and unlock and by wrong TOTP codes or passkeys. Every fifth
+  failure in a row locks the account, for 1, 5, 15, then 60 minutes; the
+  error says how long. Backup codes (100 random bits) are not counted, so
+  they still work while sign-in is locked. The counter is
   cleared only after a *complete* sign-in, so knowing the password does not
   reset it between 2FA guesses. Constant-shape prelogin responses for unknown
   emails (deterministic fake salt).

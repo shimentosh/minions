@@ -56,7 +56,7 @@ model User {
   vaults              Vault[]
   recoveryCodes       RecoveryCode[]
   emailVerifications  EmailVerification[]
-  accountResets       AccountReset[]
+  backupCodes         BackupCode[]
   webauthnCredentials WebauthnCredential[]
   devices             Device[]
   sessions            Session[]
@@ -89,19 +89,20 @@ model EmailVerification {
   @@map("email_verifications")
 }
 
-/// Single-use links that reset an account whose master password was forgotten.
-/// Resetting deletes the vault; nothing can be recovered. Only the SHA-256 of the token is stored.
-model AccountReset {
-  id        String    @id @default(uuid()) @db.Uuid
-  userId    String    @db.Uuid
-  tokenHash String    @unique
-  expiresAt DateTime
-  usedAt    DateTime?
-  createdAt DateTime  @default(now())
-  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+/// Backup codes for a forgotten master password, made on the client. Each
+/// holds the user key wrapped by a key derived from the code, so using one
+/// keeps the vault; the server stores only the SHA-256 of the code's proof.
+model BackupCode {
+  id               String    @id @default(uuid()) @db.Uuid
+  userId           String    @db.Uuid
+  proofHash        String    @unique
+  protectedUserKey String
+  usedAt           DateTime?
+  createdAt        DateTime  @default(now())
+  user             User      @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([userId])
-  @@map("account_resets")
+  @@map("backup_codes")
 }
 
 model RecoveryCode {

@@ -22,33 +22,32 @@ import { Algorithm, hash, verify } from "@node-rs/argon2";
 import { ActivityService } from "../activity/activity.service";
 import type { AuthContext, ClientInfo } from "../common/auth-context";
 import { PrismaService } from "../common/prisma.service";
-import { hmac, newToken, serverDecrypt, serverEncrypt, sha256 } from "../common/server-crypto";
+import { hmac, serverDecrypt, serverEncrypt, sha256 } from "../common/server-crypto";
 import { loadConfig } from "../config";
-import type { Prisma } from "../generated/prisma/client";
 import { Mailer } from "../mail/mailer";
 import { SessionsService } from "../sessions/sessions.service";
-import { revokeMembership } from "../workspaces/workspaces.service";
 import type {
+  BackupCodesDto,
   ChangePasswordDto,
   DeviceDto,
   LoginDto,
+  RecoverCheckDto,
+  RecoverCompleteDto,
   RegisterDto,
-  ResetCompleteDto,
 } from "./auth.dto";
 import { EmailVerificationService } from "./email-verification";
 
 const ARGON = { algorithm: Algorithm.Argon2id, memoryCost: 19456, timeCost: 2, parallelism: 1 };
 const LOCK_AFTER = 5;
+/** How long each lock lasts: the first after 5 failures in a row, the next after 10, and so on. */
+const LOCK_MINUTES = [1, 5, 15, 60];
 const MAX_2FA_ATTEMPTS = 5;
 const RECOVERY_CODE_COUNT = 10;
-const RESET_TTL_MS = 60 * 60_000;
-/** A reset link asked for again within this long is not re-sent, so nobody can flood an inbox. */
-const RESET_COOLDOWN_MS = 2 * 60_000;
 
-function badResetLink() {
+function badBackupCode() {
   return new BadRequestException({
-    message: "This reset link is invalid or has expired. Request a new one.",
-    code: "BAD_RESET_LINK",
+    message: "That backup code doesn't match this email, or it was already used.",
+    code: "BAD_BACKUP_CODE",
   });
 }
 
@@ -181,8 +180,13 @@ export class AuthService {
 
   private assertNotLocked(user: { lockedUntil: Date | null }) {
     if (user.lockedUntil && user.lockedUntil > new Date()) {
+      const minutes = Math.ceil((user.lockedUntil.getTime() - Date.now()) / 60_000);
       throw new HttpException(
-        { message: "Too many failed attempts. Try again later.", code: "ACCOUNT_LOCKED" },
+        {
+          message: `Too many wrong attempts, so sign-in is paused. Try again in ${minutes} minute${minutes === 1 ? "" : "s"}, or use a backup code.`,
+          code: "ACCOUNT_LOCKED",
+          retryAt: user.lockedUntil.toISOString(),
+        },
         HttpStatus.TOO_MANY_REQUESTS,
       );
     }
@@ -192,7 +196,8 @@ export class AuthService {
    * One failed proof of identity: a wrong master password at sign-in or
    * unlock, or a wrong second factor. All of them feed the same per-account
    * counter, incremented atomically so parallel guesses cannot share a count.
-   * From the fifth failure the account locks for 1, 2, 4… up to 60 minutes.
+   * Every fifth failure in a row locks the account, for 1, 5, 15, then 60
+   * minutes, so a typo after a lock ends does not lock it again at once.
    */
   private async registerFailure(
     userId: string,
@@ -204,10 +209,10 @@ export class AuthService {
       data: { failedLoginCount: { increment: 1 } },
       select: { failedLoginCount: true },
     });
-    const lockedUntil =
-      count >= LOCK_AFTER
-        ? new Date(Date.now() + Math.min(2 ** (count - LOCK_AFTER), 60) * 60_000)
-        : null;
+    const locks = count / LOCK_AFTER;
+    const lockedUntil = Number.isInteger(locks)
+      ? new Date(Date.now() + LOCK_MINUTES[Math.min(locks, LOCK_MINUTES.length) - 1]! * 60_000)
+      : null;
     if (lockedUntil)
       await this.prisma.user.update({ where: { id: userId }, data: { lockedUntil } });
     await this.activity.log({ ...actor, userId }, "auth.login_failed", { metadata: { reason } });
@@ -550,82 +555,65 @@ export class AuthService {
     await this.activity.securityEvent(auth, "master_password_changed", "critical");
   }
 
-  // ─── Account reset (forgotten master password) ─────────────────────────────
+  // ─── Backup codes (forgotten master password) ──────────────────────────────
   //
-  // The vault is encrypted with keys only the master password opens, so a
-  // forgotten password cannot be recovered. What can be done is a fresh
-  // start on the same email: an emailed link proves the address, the client
-  // makes new keys, and everything encrypted under the old ones is deleted.
-  // The link opens nothing of the old account, so someone who takes over the
-  // mailbox can destroy the vault but never read it; with two-factor sign-in
-  // on, they also need the second factor.
+  // Made on the client, each code wraps the user key, so using one changes
+  // only the master password: the vault, workspaces, shares and devices stay
+  // as they were. The server keeps the SHA-256 of each code's proof, never
+  // the code, and cannot open the wrapped key.
 
-  /**
-   * Emails a reset link if the address has an account. The caller answers
-   * before this runs, so neither the response nor its timing says whether
-   * the account exists. A new link replaces the last unused one.
-   */
-  async requestReset(email: string): Promise<void> {
-    const user = await this.prisma.user.findUnique({
-      where: { email: this.normalizeEmail(email) },
-      select: { id: true, email: true },
+  async backupCodesStatus(auth: AuthContext) {
+    const rows = await this.prisma.backupCode.findMany({
+      where: { userId: auth.userId },
+      select: { usedAt: true, createdAt: true },
     });
-    if (!user) return;
-    const recent = await this.prisma.accountReset.count({
-      where: {
-        userId: user.id,
-        usedAt: null,
-        createdAt: { gt: new Date(Date.now() - RESET_COOLDOWN_MS) },
-      },
-    });
-    if (recent) return;
-    const token = newToken();
+    return {
+      total: rows.length,
+      remaining: rows.filter((r) => !r.usedAt).length,
+      createdAt: rows[0]?.createdAt.toISOString() ?? null,
+    };
+  }
+
+  /** A new set replaces the old one, used or not. */
+  async replaceBackupCodes(auth: AuthContext, dto: BackupCodesDto) {
+    await this.verifyAuthKey(auth, dto.authKey);
     await this.prisma.$transaction([
-      this.prisma.accountReset.deleteMany({ where: { userId: user.id, usedAt: null } }),
-      this.prisma.accountReset.create({
-        data: {
-          userId: user.id,
-          tokenHash: sha256(token),
-          expiresAt: new Date(Date.now() + RESET_TTL_MS),
-        },
+      this.prisma.backupCode.deleteMany({ where: { userId: auth.userId } }),
+      this.prisma.backupCode.createMany({
+        data: dto.codes.map((c) => ({
+          userId: auth.userId,
+          proofHash: sha256(c.proof),
+          protectedUserKey: c.protectedUserKey,
+        })),
       }),
     ]);
-    await this.mailer.send({
-      to: user.email,
-      subject: "Reset your Minions account",
-      text: [
-        "Someone asked to reset the Minions account for this address, usually because the master password was forgotten.",
-        "",
-        "Minions cannot recover your vault. It is encrypted with your master password, which nobody else has. Resetting deletes everything in your vault and lets you start again with a new master password on this email.",
-        "",
-        "If you remember your master password, ignore this email and nothing changes.",
-        "",
-        "To reset your account, open this link:",
-        "",
-        `${loadConfig().mail.publicWebUrl}/reset-account#${token}`,
-        "",
-        "It works once and expires in 1 hour. Minions will never ask for your master password by email.",
-      ].join("\n"),
+    await this.activity.securityEvent(auth, "backup_codes_created", "warning", {
+      count: dto.codes.length,
     });
   }
 
-  private async resetRow(token: string) {
-    const row = await this.prisma.accountReset.findUnique({
-      where: { tokenHash: sha256(token) },
-      include: { user: true },
+  /**
+   * The codes are unguessable, so a wrong one does not count towards the
+   * lockout: someone locked out by wrong passwords can still get back in.
+   * Unknown email and wrong code answer the same.
+   */
+  private async backupCodeFor(email: string, proof: string) {
+    const row = await this.prisma.backupCode.findUnique({
+      where: { proofHash: sha256(proof) },
+      include: { user: { include: { vaults: { orderBy: { createdAt: "asc" }, take: 1 } } } },
     });
-    if (!row || row.usedAt || row.expiresAt <= new Date()) throw badResetLink();
+    if (!row || row.usedAt || row.user.email !== this.normalizeEmail(email)) throw badBackupCode();
     return row;
   }
 
-  /** What the reset page needs before the person chooses a new master password. */
-  async checkReset(token: string) {
-    const { user } = await this.resetRow(token);
-    return { email: user.email, userId: user.id, twoFactorRequired: user.twoFactorEnabled };
+  /** What the client needs to open the user key before choosing a new master password. */
+  async checkBackupCode(dto: RecoverCheckDto) {
+    const { user, protectedUserKey } = await this.backupCodeFor(dto.email, dto.proof);
+    return { userId: user.id, protectedUserKey, twoFactorRequired: user.twoFactorEnabled };
   }
 
-  async completeReset(dto: ResetCompleteDto, client: ClientInfo): Promise<AuthOutcome> {
-    const row = await this.resetRow(dto.token);
+  async recoverWithBackupCode(dto: RecoverCompleteDto, client: ClientInfo): Promise<AuthOutcome> {
+    const row = await this.backupCodeFor(dto.email, dto.proof);
     const user = row.user;
     if (user.twoFactorEnabled) {
       this.assertNotLocked(user);
@@ -636,44 +624,31 @@ export class AuthService {
       }
     }
     const authHash = await hash(dto.authKey, ARGON);
-    const { fresh, vault, summary } = await this.prisma.$transaction(
-      async (tx) => {
-        // One conditional UPDATE: a link works once, even if submitted twice at the same time.
-        const used = await tx.accountReset.updateMany({
-          where: { id: row.id, usedAt: null, expiresAt: { gt: new Date() } },
-          data: { usedAt: new Date() },
-        });
-        if (used.count !== 1) throw badResetLink();
-        const summary = await this.wipeAccount(tx, user.id);
-        const fresh = await tx.user.update({
-          where: { id: user.id },
-          data: {
-            // Opening the link proved the address.
-            emailVerifiedAt: user.emailVerifiedAt ?? new Date(),
-            authHash,
-            kdfMemory: dto.kdf.memory,
-            kdfIterations: dto.kdf.iterations,
-            kdfParallelism: dto.kdf.parallelism,
-            kdfSalt: dto.kdf.salt,
-            protectedUserKey: dto.protectedUserKey,
-            publicKey: null,
-            protectedPrivateKey: null,
-            twoFactorEnabled: false,
-            twoFactorSecretEnc: null,
-            lastTotpStep: null,
-            failedLoginCount: 0,
-            lockedUntil: null,
-            previousVisitAt: null,
-            lastVisitAt: new Date(),
-          },
-        });
-        const vault = await tx.vault.create({
-          data: { id: dto.vaultId, userId: user.id, protectedKey: dto.protectedVaultKey },
-        });
-        return { fresh, vault, summary };
-      },
-      { timeout: 60_000 },
-    );
+    const fresh = await this.prisma.$transaction(async (tx) => {
+      // One conditional UPDATE: a code works once, even if submitted twice at the same time.
+      const used = await tx.backupCode.updateMany({
+        where: { id: row.id, usedAt: null },
+        data: { usedAt: new Date() },
+      });
+      if (used.count !== 1) throw badBackupCode();
+      await tx.session.updateMany({
+        where: { userId: user.id, revokedAt: null },
+        data: { revokedAt: new Date(), vaultUnlockedUntil: null },
+      });
+      return tx.user.update({
+        where: { id: user.id },
+        data: {
+          authHash,
+          kdfMemory: dto.kdf.memory,
+          kdfIterations: dto.kdf.iterations,
+          kdfParallelism: dto.kdf.parallelism,
+          kdfSalt: dto.kdf.salt,
+          protectedUserKey: dto.protectedUserKey,
+          failedLoginCount: 0,
+          lockedUntil: null,
+        },
+      });
+    });
     const device = await this.sessions.upsertDevice(user.id, dto.device, client);
     const { token, id } = await this.sessions.create(
       user.id,
@@ -682,85 +657,31 @@ export class AuthService {
       client,
       fresh.autoLockMinutes,
     );
+    await this.markVisit(user.id);
+    const remaining = await this.prisma.backupCode.count({
+      where: { userId: user.id, usedAt: null },
+    });
     const actor = { userId: user.id, deviceId: device.id, sessionId: id, ...client };
-    await this.activity.log(actor, "auth.account_reset");
-    await this.activity.securityEvent(actor, "account_reset", "critical", {
-      count: summary.workspacesLeft,
+    await this.activity.log(actor, "auth.password_recovered");
+    await this.activity.securityEvent(actor, "master_password_recovered", "critical", {
+      count: remaining,
     });
     await this.mailer
       .send({
         to: user.email,
-        subject: "Your Minions account was reset",
+        subject: "Your Minions master password was changed",
         text: [
-          "Your Minions account was reset with a new master password. The old vault was deleted.",
+          "A backup code was used to set a new master password for your Minions account. Your vault was not changed, and every other device was signed out.",
           "",
-          "If you did not do this, someone can read your email. Secure your email account, then reset Minions again from the sign-in page.",
+          `You have ${remaining} unused backup code${remaining === 1 ? "" : "s"} left. Make a new set in Settings → Security when you run low.`,
+          "",
+          "If you did not do this, someone has one of your backup codes. Sign in, change your master password, and make new backup codes.",
         ].join("\n"),
       })
       .catch(() => undefined);
-    return this.outcome(dto.device, token, { status: "ok", keys: this.keysFor(fresh, vault) });
-  }
-
-  /**
-   * Deletes everything the old keys protected or that would reveal the old
-   * vault to whoever holds the link: the personal vault and all it holds,
-   * share links, people shares both ways, sessions, devices, second
-   * factors, the sharing key pair, and the personal activity history. The
-   * account keeps its id, email, name and settings. Workspace memberships end
-   * as if the person had left; a workspace they own passes to its longest-
-   * standing confirmed admin (or member), or is deleted when nobody else is in it.
-   */
-  private async wipeAccount(tx: Prisma.TransactionClient, userId: string) {
-    const memberships = await tx.workspaceMember.findMany({
-      where: { userId },
-      include: { workspace: { select: { id: true, vaultId: true } } },
+    return this.outcome(dto.device, token, {
+      status: "ok",
+      keys: this.keysFor(fresh, user.vaults[0]!),
     });
-    let workspacesDeleted = 0;
-    for (const m of memberships) {
-      if (m.role === "OWNER") {
-        const successor = await tx.workspaceMember.findFirst({
-          where: { workspaceId: m.workspaceId, status: "CONFIRMED", userId: { not: userId } },
-          // Role order is OWNER, ADMIN, MEMBER: admins first.
-          orderBy: [{ role: "asc" }, { confirmedAt: "asc" }],
-        });
-        if (!successor) {
-          // The vault cascades to the workspace, its members, items, grants and folders.
-          await tx.vault.delete({ where: { id: m.workspace.vaultId } });
-          workspacesDeleted++;
-          continue;
-        }
-        await revokeMembership(tx, m.workspace, m);
-        await tx.workspaceMember.update({ where: { id: successor.id }, data: { role: "OWNER" } });
-      } else {
-        await revokeMembership(tx, m.workspace, m);
-      }
-    }
-
-    const vaultIds = (await tx.vault.findMany({ where: { userId }, select: { id: true } })).map(
-      (v) => v.id,
-    );
-    const inVaults = { vaultId: { in: vaultIds } };
-    await tx.share.deleteMany({ where: { userId } });
-    await tx.itemShare.deleteMany({
-      where: { OR: [{ ownerId: userId }, { recipientId: userId }] },
-    });
-    await tx.securityFindingState.deleteMany({ where: inVaults });
-    await tx.securityFindingRecord.deleteMany({ where: inVaults });
-    await tx.securitySnapshot.deleteMany({ where: inVaults });
-    // Items, fields, versions, notes, projects, collections and tags cascade.
-    await tx.vault.deleteMany({ where: { userId } });
-    await tx.importJob.deleteMany({ where: { userId } });
-    await tx.aiClassification.deleteMany({ where: { userId } });
-    await tx.userClassificationPreference.deleteMany({ where: { userId } });
-    await tx.session.deleteMany({ where: { userId } });
-    await tx.device.deleteMany({ where: { userId } });
-    await tx.recoveryCode.deleteMany({ where: { userId } });
-    await tx.webauthnCredential.deleteMany({ where: { userId } });
-    await tx.emailVerification.deleteMany({ where: { userId } });
-    await tx.accountReset.deleteMany({ where: { userId, usedAt: null } });
-    // Workspace audit entries stay: they belong to the workspace's history.
-    await tx.activityLog.deleteMany({ where: { userId, workspaceId: null } });
-    await tx.securityEvent.deleteMany({ where: { userId } });
-    return { workspacesLeft: memberships.length - workspacesDeleted, workspacesDeleted };
   }
 }

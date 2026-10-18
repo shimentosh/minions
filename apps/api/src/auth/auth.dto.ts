@@ -1,5 +1,8 @@
 import { Type } from "class-transformer";
 import {
+  ArrayMaxSize,
+  ArrayMinSize,
+  IsArray,
   IsBase64,
   IsEmail,
   IsIn,
@@ -17,8 +20,6 @@ import {
 } from "class-validator";
 
 const ENVELOPE = /^v1\.[A-Za-z0-9+/]{16}\.[A-Za-z0-9+/]+={0,2}$/;
-/** 32 random bytes, base64url. Only its SHA-256 is stored. */
-const LINK_TOKEN = /^[A-Za-z0-9_-]{43}$/;
 
 export class DeviceDto {
   @IsString() @Length(8, 100) clientDeviceId!: string;
@@ -81,22 +82,32 @@ export class ChangePasswordDto {
   @Matches(ENVELOPE) @MaxLength(200) protectedUserKey!: string;
 }
 
-export class ResetRequestDto {
+export class BackupCodeEntryDto {
+  /** Derived from the code on the client; only its SHA-256 is stored. */
+  @IsBase64() @Length(44, 44) proof!: string;
+  @Matches(ENVELOPE) @MaxLength(200) protectedUserKey!: string;
+}
+
+export class BackupCodesDto extends AuthKeyDto {
+  @IsArray()
+  @ArrayMinSize(1)
+  @ArrayMaxSize(16)
+  @ValidateNested({ each: true })
+  @Type(() => BackupCodeEntryDto)
+  codes!: BackupCodeEntryDto[];
+}
+
+export class RecoverCheckDto {
   @IsEmail() @MaxLength(254) email!: string;
+  @IsBase64() @Length(44, 44) proof!: string;
 }
 
-export class ResetTokenDto {
-  @Matches(LINK_TOKEN) token!: string;
-}
-
-/** A fresh start for an account whose master password was forgotten: new keys, empty vault. */
-export class ResetCompleteDto extends ResetTokenDto {
+/** A forgotten master password: the backup code opened the user key, which is now under a new one. */
+export class RecoverCompleteDto extends RecoverCheckDto {
   /** Required when the account has two-factor sign-in: a TOTP or recovery code. */
   @IsOptional() @IsString() @MinLength(6) @MaxLength(20) code?: string;
-  @IsUUID(4) vaultId!: string;
   @IsBase64() @Length(44, 44) authKey!: string;
   @ValidateNested() @Type(() => KdfDto) kdf!: KdfDto;
   @Matches(ENVELOPE) @MaxLength(200) protectedUserKey!: string;
-  @Matches(ENVELOPE) @MaxLength(200) protectedVaultKey!: string;
   @ValidateNested() @Type(() => DeviceDto) device!: DeviceDto;
 }

@@ -5,9 +5,8 @@ import {
   lazyRouteComponent,
   Navigate,
   Outlet,
-  useNavigate,
 } from "@tanstack/react-router";
-import { useEffect, useState } from "react";
+import { useEffect } from "react";
 import { LockScreen, SignInScreen, Splash } from "@/components/auth/auth-screens";
 import { CommandPalette } from "@/components/command-palette";
 import { AppSidebar } from "@/components/layout/app-sidebar";
@@ -33,7 +32,6 @@ import type { NotesSearch } from "@/routes/notes-page";
 import { OperatorPage } from "@/routes/operator-page";
 import { ProjectPage, ProjectsPage } from "@/routes/projects-page";
 import { PublicSharePage } from "@/routes/public-share-page";
-import { ResetAccountPage } from "@/routes/reset-account-page";
 import { SecurityPage } from "@/routes/security-page";
 import { SharedPage, type SharedSearch } from "@/routes/shared-page";
 import { SharesPage } from "@/routes/shares-page";
@@ -101,11 +99,7 @@ function Gate() {
 }
 
 function Root() {
-  const navigate = useNavigate();
   const pathname = window.location.pathname;
-  // A finished account reset goes straight into the new vault. A reload
-  // would drop its key, so this switches screens in place.
-  const [resetting, setResetting] = useState(() => pathname === "/reset-account");
   return (
     <ToastProvider position="bottom-right">
       <TooltipProvider delay={400}>
@@ -115,13 +109,6 @@ function Root() {
             <PublicSharePage />
           ) : pathname === "/verify-email" ? (
             <VerifyEmailPage />
-          ) : resetting ? (
-            <ResetAccountPage
-              onDone={() => {
-                setResetting(false);
-                void navigate({ to: "/vault", replace: true });
-              }}
-            />
           ) : (
             <Gate />
           )}
@@ -248,7 +235,6 @@ const routes = [
   createRoute({ getParentRoute: () => rootRoute, path: "/login", component: ToVault }),
   createRoute({ getParentRoute: () => rootRoute, path: "/register", component: ToVault }),
   createRoute({ getParentRoute: () => rootRoute, path: "/forgot-password", component: ToVault }),
-  createRoute({ getParentRoute: () => rootRoute, path: "/reset-account", component: ToVault }),
 ];
 
 export const router = createRouter({

@@ -1,15 +1,15 @@
-import { estimateStrength } from "@minions/core";
-import { Eye, EyeOff, Fingerprint, Lock, MailCheck, ShieldCheck } from "lucide-react";
+import { estimateStrength, normalizeBackupCode } from "@minions/core";
+import { Eye, EyeOff, Fingerprint, Lock, ShieldCheck } from "lucide-react";
 import { type ReactNode, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Card, CardDescription, CardHeader, CardPanel, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { errorMessage, post } from "@/lib/api";
+import { errorMessage } from "@/lib/api";
 import { cn } from "@/lib/cn";
-import { useSession } from "@/lib/session";
+import { checkBackupCode, useSession } from "@/lib/session";
 
-export function AuthLayout({
+function AuthLayout({
   children,
   title,
   subtitle,
@@ -66,6 +66,9 @@ export function PasswordInput({
         autoFocus={autoFocus}
         autoComplete={autoComplete}
         placeholder={placeholder}
+        // Shown as text, a phone keyboard would capitalise or "correct" the password.
+        autoCapitalize="none"
+        autoCorrect="off"
         spellCheck={false}
         className="pe-9"
       />
@@ -81,7 +84,7 @@ export function PasswordInput({
   );
 }
 
-export function FormError({ error }: { error: string | null }) {
+function FormError({ error }: { error: string | null }) {
   if (!error) return null;
   return (
     <p className="rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-2 text-destructive-foreground text-sm">
@@ -215,28 +218,32 @@ function TwoFactorStep() {
 }
 
 /**
- * Forgotten master password. The vault is encrypted with it on this device,
- * so it cannot be recovered; the emailed link resets the account to an empty
- * vault instead. The answer is the same whether or not the account exists.
+ * Forgotten master password. Nobody can recover it, but a backup code opens
+ * the same vault on this device, so a new master password can be set without
+ * losing anything: items, workspaces and shares stay as they are.
  */
 function ForgotPassword({ initialEmail, onBack }: { initialEmail: string; onBack: () => void }) {
+  const recover = useSession((s) => s.recover);
   const [email, setEmail] = useState(initialEmail);
-  const [sentTo, setSentTo] = useState<string | null>(null);
+  const [backupCode, setBackupCode] = useState("");
+  const [checked, setChecked] = useState<{ twoFactorRequired: boolean } | null>(null);
+  const [password, setPassword] = useState("");
+  const [confirm, setConfirm] = useState("");
+  const [code, setCode] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
-  async function submit(e: React.FormEvent) {
-    e.preventDefault();
+  async function run(fn: () => Promise<void>) {
     setBusy(true);
     setError(null);
     try {
-      await post("/auth/reset/request", { email: email.trim() });
-      setSentTo(email.trim());
+      await fn();
     } catch (err) {
       setError(errorMessage(err));
-    } finally {
       setBusy(false);
+      return;
     }
+    setBusy(false);
   }
 
   const back = (
@@ -245,63 +252,148 @@ function ForgotPassword({ initialEmail, onBack }: { initialEmail: string; onBack
       className="w-full text-center text-muted-foreground text-sm hover:text-foreground"
       onClick={onBack}
     >
-      Back to sign in
+      I remembered it, back to sign in
     </button>
   );
 
-  if (sentTo)
+  if (!checked)
     return (
-      <AuthLayout title="Check your email">
-        <div className="space-y-4">
-          <p className="flex gap-2.5 text-muted-foreground text-sm">
-            <MailCheck className="mt-0.5 size-4 shrink-0 text-foreground" />
-            <span>
-              If <span className="font-medium text-foreground">{sentTo}</span> has a Minions
-              account, a reset link is on its way. It works once and expires in 1 hour.
-            </span>
-          </p>
-          <p className="text-muted-foreground text-xs">
-            Remembered your password? Nothing changes until you open the link and confirm.
+      <AuthLayout
+        title="Forgot your master password?"
+        subtitle="Use one of your backup codes to set a new one. Your vault stays exactly as it is."
+      >
+        <form
+          className="space-y-4"
+          onSubmit={(e) => {
+            e.preventDefault();
+            void run(async () => {
+              const r = await checkBackupCode(email.trim(), backupCode);
+              setChecked({ twoFactorRequired: r.twoFactorRequired });
+            });
+          }}
+        >
+          <div className="space-y-1.5">
+            <Label htmlFor="recover-email">Email</Label>
+            <Input
+              id="recover-email"
+              type="email"
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+              autoComplete="username"
+              autoFocus={!initialEmail}
+            />
+          </div>
+          <div className="space-y-1.5">
+            <Label htmlFor="backup-code">Backup code</Label>
+            <Input
+              id="backup-code"
+              value={backupCode}
+              onChange={(e) => setBackupCode(e.target.value)}
+              placeholder="xxxxx-xxxxx-xxxxx-xxxxx"
+              autoComplete="off"
+              autoCapitalize="none"
+              autoCorrect="off"
+              spellCheck={false}
+              autoFocus={!!initialEmail}
+              className="font-mono"
+            />
+            <p className="text-muted-foreground text-xs">
+              From the list you saved when you made backup codes in Settings → Security.
+            </p>
+          </div>
+          <FormError error={error} />
+          <Button
+            type="submit"
+            className="w-full"
+            loading={busy}
+            disabled={!email.includes("@") || !normalizeBackupCode(backupCode)}
+          >
+            Continue
+          </Button>
+          <p className="rounded-lg bg-muted/60 px-3 py-2.5 text-muted-foreground text-xs">
+            No backup code? Your master password can't be recovered, not even by Minions: it is what
+            keeps your vault private. Check where you might have saved it, and try the variations
+            you usually use.
           </p>
           {back}
-        </div>
+        </form>
       </AuthLayout>
     );
 
+  const strength = estimateStrength(password);
+  const canSave =
+    password.length >= 12 &&
+    strength.score >= 3 &&
+    password === confirm &&
+    (!checked.twoFactorRequired || code.trim().length >= 6);
+
   return (
     <AuthLayout
-      title="Forgot your master password?"
-      subtitle="Nobody can recover it, not even the server. Your vault is encrypted with it on your device."
+      title="Choose a new master password"
+      subtitle="Your vault, workspaces and shares stay as they are. Other devices are signed out."
     >
-      <form className="space-y-4" onSubmit={submit}>
-        <div className="space-y-1.5 rounded-lg bg-muted/60 px-3 py-2.5 text-sm">
-          <p className="font-medium">Before you reset</p>
-          <ul className="list-disc space-y-1 ps-4 text-muted-foreground">
-            <li>
-              Check where you might have saved it: a browser, another password manager, paper.
-            </li>
-            <li>Try the variations you usually use: capitals, spaces, a number at the end.</li>
-          </ul>
-        </div>
-        <p className="rounded-lg bg-warning/8 px-3 py-2 text-warning-foreground text-xs">
-          Resetting deletes everything in your vault and starts an empty one on the same email.
-          Workspaces you own pass to an admin, or are deleted if you are their only member.
-        </p>
+      <form
+        className="space-y-4"
+        onSubmit={(e) => {
+          e.preventDefault();
+          void run(() =>
+            recover({
+              email: email.trim(),
+              backupCode,
+              password,
+              code: checked.twoFactorRequired ? code.trim() : undefined,
+            }),
+          );
+        }}
+      >
         <div className="space-y-1.5">
-          <Label htmlFor="reset-email">Email</Label>
-          <Input
-            id="reset-email"
-            type="email"
-            value={email}
-            onChange={(e) => setEmail(e.target.value)}
-            autoComplete="username"
+          <Label htmlFor="new-password">New master password</Label>
+          <PasswordInput
+            id="new-password"
+            value={password}
+            onChange={setPassword}
             autoFocus
+            autoComplete="new-password"
           />
+          <StrengthBar password={password} />
         </div>
+        <div className="space-y-1.5">
+          <Label htmlFor="confirm-password">Confirm master password</Label>
+          <PasswordInput
+            id="confirm-password"
+            value={confirm}
+            onChange={setConfirm}
+            autoComplete="new-password"
+          />
+          {confirm && confirm !== password && (
+            <p className="text-destructive-foreground text-xs">Passwords don't match</p>
+          )}
+        </div>
+        {checked.twoFactorRequired && (
+          <div className="space-y-1.5">
+            <Label htmlFor="recover-2fa">Two-factor code</Label>
+            <Input
+              id="recover-2fa"
+              value={code}
+              onChange={(e) => setCode(e.target.value)}
+              autoComplete="one-time-code"
+              placeholder="123456"
+              className="font-mono tracking-widest"
+            />
+            <p className="text-muted-foreground text-xs">
+              From your authenticator app, or one of your two-factor recovery codes.
+            </p>
+          </div>
+        )}
         <FormError error={error} />
-        <Button type="submit" className="w-full" loading={busy} disabled={!email.includes("@")}>
-          Email me a reset link
+        <Button type="submit" className="w-full" loading={busy} disabled={!canSave}>
+          Set new master password
         </Button>
+        {busy && (
+          <p className="text-center text-muted-foreground text-xs">
+            Opening your vault on this device…
+          </p>
+        )}
         {back}
       </form>
     </AuthLayout>

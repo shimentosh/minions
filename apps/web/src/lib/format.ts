@@ -56,6 +56,7 @@ export const ACTION_LABELS: Record<string, string> = {
   "auth.login_failed": "Failed sign-in",
   "auth.registered": "Account created",
   "auth.account_reset": "Account reset",
+  "auth.password_recovered": "Master password reset with a backup code",
   "device.added": "Device added",
   "device.linked": "Extension connected",
   "device.revoked": "Device revoked",
@@ -99,4 +100,6 @@ export const SECURITY_EVENT_LABELS: Record<string, string> = {
   vault_key_rotated: "Vault key changed",
   email_verified: "Email address confirmed",
   account_reset: "Account reset after a forgotten master password",
+  backup_codes_created: "Backup codes created",
+  master_password_recovered: "Master password reset with a backup code",
 };
