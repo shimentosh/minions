@@ -217,16 +217,21 @@ files, servers, databases and SSH keys, organized by project. Unlike KeePass, it
 through your own server and works in the browser.
 
 **Can the server owner read my passwords?**
-No. Secrets are encrypted on your device with keys derived from your master password,
-which is never sent. The server can see some metadata, such as item names and websites;
-see [what the server can see](ARCHITECTURE.md#what-the-server-can-see-safe-metadata).
+Not with email reset turned off. Secrets are encrypted on your device with keys derived
+from your master password, which is never sent. The server can see some metadata, such as
+item names and websites; see
+[what the server can see](ARCHITECTURE.md#what-the-server-can-see-safe-metadata).
+Email reset, on by default, is the exception: to restore your vault from an email link,
+the server keeps a copy of your vault key encrypted with its own key, so someone holding
+that key and the database could read it. Turn it off in Settings → Security if you want
+only yourself to be able to open the vault.
 
 **What happens if I forget my master password?**
-Nobody can recover it, not even the server owner: that is the price of end-to-end
-encryption. Make **backup codes** in Settings → Security and keep them somewhere safe,
-such as on paper. With one, "Forgot password?" on the sign-in screen lets you set a new
-master password, and your vault, workspaces and shares stay exactly as they were.
-Without one, the vault cannot be opened again.
+Choose "Forgot password?" on the sign-in screen and we email you a link. Open it, choose a
+new master password, and your vault, workspaces and shares stay exactly as they were.
+**Backup codes** (Settings → Security) do the same without email: keep them somewhere safe,
+such as on paper, for when email reset is off or your mailbox is out of reach. With email
+reset off and no backup code, the vault cannot be opened again.
 
 **Does the AI see my passwords?**
 No. AI organizing is optional and off without an API key. It only receives names and

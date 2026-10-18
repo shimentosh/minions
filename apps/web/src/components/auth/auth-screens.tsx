@@ -1,13 +1,13 @@
 import { estimateStrength, normalizeBackupCode } from "@minions/core";
-import { Eye, EyeOff, Fingerprint, Lock, ShieldCheck } from "lucide-react";
-import { type ReactNode, useState } from "react";
+import { Eye, EyeOff, Fingerprint, Lock, Mail, ShieldCheck } from "lucide-react";
+import { type ReactNode, useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Card, CardDescription, CardHeader, CardPanel, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { errorMessage } from "@/lib/api";
+import { errorMessage, post } from "@/lib/api";
 import { cn } from "@/lib/cn";
-import { checkBackupCode, useSession } from "@/lib/session";
+import { checkBackupCode, requestPasswordReset, useSession } from "@/lib/session";
 
 function AuthLayout({
   children,
@@ -218,18 +218,17 @@ function TwoFactorStep() {
 }
 
 /**
- * Forgotten master password. Nobody can recover it, but a backup code opens
- * the same vault on this device, so a new master password can be set without
- * losing anything: items, workspaces and shares stay as they are.
+ * Forgotten master password. Usually a link sent to the account's email; a
+ * backup code works too, for when email reset is off or the mailbox is out
+ * of reach. Either way only the master password changes: items, workspaces
+ * and shares stay as they are.
  */
 function ForgotPassword({ initialEmail, onBack }: { initialEmail: string; onBack: () => void }) {
   const recover = useSession((s) => s.recover);
+  const [step, setStep] = useState<"email" | "sent" | "backup">("email");
   const [email, setEmail] = useState(initialEmail);
   const [backupCode, setBackupCode] = useState("");
   const [checked, setChecked] = useState<{ twoFactorRequired: boolean } | null>(null);
-  const [password, setPassword] = useState("");
-  const [confirm, setConfirm] = useState("");
-  const [code, setCode] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
@@ -256,11 +255,78 @@ function ForgotPassword({ initialEmail, onBack }: { initialEmail: string; onBack
     </button>
   );
 
-  if (!checked)
+  const otherWay = (label: string, to: "email" | "backup") => (
+    <button
+      type="button"
+      className="w-full text-center text-muted-foreground text-sm hover:text-foreground"
+      onClick={() => {
+        setError(null);
+        setStep(to);
+      }}
+    >
+      {label}
+    </button>
+  );
+
+  if (step === "email")
     return (
       <AuthLayout
         title="Forgot your master password?"
-        subtitle="Use one of your backup codes to set a new one. Your vault stays exactly as it is."
+        subtitle="We'll email you a link to set a new one. Your vault stays exactly as it is."
+      >
+        <form
+          className="space-y-4"
+          onSubmit={(e) => {
+            e.preventDefault();
+            void run(async () => {
+              await requestPasswordReset(email.trim());
+              setStep("sent");
+            });
+          }}
+        >
+          <div className="space-y-1.5">
+            <Label htmlFor="reset-email">Email</Label>
+            <Input
+              id="reset-email"
+              type="email"
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+              autoComplete="username"
+              autoFocus
+            />
+          </div>
+          <FormError error={error} />
+          <Button type="submit" className="w-full" loading={busy} disabled={!email.includes("@")}>
+            <Mail /> Send reset link
+          </Button>
+          {otherWay("Use a backup code instead", "backup")}
+          {back}
+        </form>
+      </AuthLayout>
+    );
+
+  if (step === "sent")
+    return (
+      <AuthLayout title="Check your email" subtitle={email.trim()}>
+        <div className="space-y-4">
+          <p className="text-muted-foreground text-sm">
+            If this address has a Minions account, a reset link is on its way. It works once and
+            expires in 1 hour. No email after a few minutes? Check your spam folder.
+          </p>
+          <Button variant="outline" className="w-full" onClick={() => setStep("email")}>
+            Use a different email
+          </Button>
+          {otherWay("Use a backup code instead", "backup")}
+          {back}
+        </div>
+      </AuthLayout>
+    );
+
+  if (!checked)
+    return (
+      <AuthLayout
+        title="Use a backup code"
+        subtitle="Set a new master password with one of the backup codes you saved. Your vault stays exactly as it is."
       >
         <form
           className="space-y-4"
@@ -310,40 +376,64 @@ function ForgotPassword({ initialEmail, onBack }: { initialEmail: string; onBack
           >
             Continue
           </Button>
-          <p className="rounded-lg bg-muted/60 px-3 py-2.5 text-muted-foreground text-xs">
-            No backup code? Your master password can't be recovered, not even by Minions: it is what
-            keeps your vault private. Check where you might have saved it, and try the variations
-            you usually use.
-          </p>
+          {otherWay("Email me a reset link instead", "email")}
           {back}
         </form>
       </AuthLayout>
     );
+
+  return (
+    <NewPasswordForm
+      subtitle="Your vault, workspaces and shares stay as they are. Other devices are signed out."
+      twoFactorRequired={checked.twoFactorRequired}
+      onSubmit={(password, code) => recover({ email: email.trim(), backupCode, password, code })}
+      footer={back}
+    />
+  );
+}
+
+/**
+ * The last step of a forgotten master password, from a backup code or an
+ * emailed link: a new password, and the second factor when 2FA is on.
+ */
+function NewPasswordForm({
+  subtitle,
+  twoFactorRequired,
+  onSubmit,
+  footer,
+}: {
+  subtitle: string;
+  twoFactorRequired: boolean;
+  onSubmit: (password: string, code: string | undefined) => Promise<void>;
+  footer: ReactNode;
+}) {
+  const [password, setPassword] = useState("");
+  const [confirm, setConfirm] = useState("");
+  const [code, setCode] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
 
   const strength = estimateStrength(password);
   const canSave =
     password.length >= 12 &&
     strength.score >= 3 &&
     password === confirm &&
-    (!checked.twoFactorRequired || code.trim().length >= 6);
+    (!twoFactorRequired || code.trim().length >= 6);
 
   return (
-    <AuthLayout
-      title="Choose a new master password"
-      subtitle="Your vault, workspaces and shares stay as they are. Other devices are signed out."
-    >
+    <AuthLayout title="Choose a new master password" subtitle={subtitle}>
       <form
         className="space-y-4"
-        onSubmit={(e) => {
+        onSubmit={async (e) => {
           e.preventDefault();
-          void run(() =>
-            recover({
-              email: email.trim(),
-              backupCode,
-              password,
-              code: checked.twoFactorRequired ? code.trim() : undefined,
-            }),
-          );
+          setBusy(true);
+          setError(null);
+          try {
+            await onSubmit(password, twoFactorRequired ? code.trim() : undefined);
+          } catch (err) {
+            setError(errorMessage(err));
+            setBusy(false);
+          }
         }}
       >
         <div className="space-y-1.5">
@@ -369,7 +459,7 @@ function ForgotPassword({ initialEmail, onBack }: { initialEmail: string; onBack
             <p className="text-destructive-foreground text-xs">Passwords don't match</p>
           )}
         </div>
-        {checked.twoFactorRequired && (
+        {twoFactorRequired && (
           <div className="space-y-1.5">
             <Label htmlFor="recover-2fa">Two-factor code</Label>
             <Input
@@ -394,9 +484,92 @@ function ForgotPassword({ initialEmail, onBack }: { initialEmail: string; onBack
             Opening your vault on this device…
           </p>
         )}
-        {back}
+        {footer}
       </form>
     </AuthLayout>
+  );
+}
+
+let linkToken: string | null = null;
+
+/**
+ * The token from the address bar, read once per page load: React may run
+ * effects twice (StrictMode), and the first read removes it from the URL.
+ * The router's history state is kept so it stays in sync.
+ */
+function takeLinkToken(): string {
+  if (linkToken === null) {
+    linkToken = window.location.hash.slice(1);
+    window.history.replaceState(window.history.state, "", window.location.pathname);
+  }
+  return linkToken;
+}
+
+type ResetLink =
+  | { kind: "checking" }
+  | { kind: "invalid"; error: string }
+  | { kind: "ready"; token: string; email: string; twoFactorRequired: boolean };
+
+/**
+ * Opened from the reset email. As with email verification, the token is in
+ * the URL fragment, which the browser never sends to a server, and it leaves
+ * the address bar at once.
+ */
+export function ResetPasswordPage({ onDone }: { onDone: () => void }) {
+  const resetPassword = useSession((s) => s.resetPassword);
+  const [link, setLink] = useState<ResetLink>({ kind: "checking" });
+
+  useEffect(() => {
+    const token = takeLinkToken();
+    if (!/^[A-Za-z0-9_-]{43}$/.test(token)) {
+      setLink({ kind: "invalid", error: "This link is incomplete. Open it again from the email." });
+      return;
+    }
+    post<{ email: string; twoFactorRequired: boolean }>("/auth/reset/check", { token }).then(
+      (r) => setLink({ kind: "ready", token, ...r }),
+      (e) => setLink({ kind: "invalid", error: errorMessage(e) }),
+    );
+  }, []);
+
+  const toSignIn = (
+    <button
+      type="button"
+      className="w-full text-center text-muted-foreground text-sm hover:text-foreground"
+      onClick={() => window.location.assign("/login")}
+    >
+      I remembered it, back to sign in
+    </button>
+  );
+
+  if (link.kind === "checking") return <AuthLayout title="Checking your link…">{null}</AuthLayout>;
+
+  if (link.kind === "invalid")
+    return (
+      <AuthLayout title="This link can't be used" subtitle={link.error}>
+        <div className="space-y-4">
+          <Button
+            className="w-full"
+            variant="outline"
+            onClick={() => window.location.assign("/forgot-password")}
+          >
+            Request a new link
+          </Button>
+          {toSignIn}
+        </div>
+      </AuthLayout>
+    );
+
+  return (
+    <NewPasswordForm
+      subtitle={`For ${link.email}. Your vault, workspaces and shares stay as they are. Other devices are signed out.`}
+      twoFactorRequired={link.twoFactorRequired}
+      onSubmit={async (password, code) => {
+        await resetPassword({ token: link.token, password, code });
+        // No reload: the vault key lives only in this page's memory.
+        onDone();
+      }}
+      footer={toSignIn}
+    />
   );
 }
 

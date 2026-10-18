@@ -26,6 +26,13 @@ encrypted, and an actively compromised server could serve a modified web app;
 see [THREAT_MODEL.md](THREAT_MODEL.md) for exactly what this does and does not
 protect.
 
+The exception is **email reset** (on by default, off in Settings → Security):
+after an unlock the client sends the raw user key once, the server checks it
+opens the vault key, and stores it as `serverEncrypt(userKey, "user:<id>:recovery")`
+in `users.recoveryKeyEnc`. A reset link (`/reset-password#token`) returns it
+after the second factor, and the page wraps it under a new master password,
+as a backup code does. Turning email reset off deletes the copy.
+
 ```
 master password ──Argon2id(salt, m=64MiB, t=3, p=1)──► masterKey (32B, client only)
 masterKey ──HKDF("minions/auth")──► authKey   → sent at login, server stores Argon2id(authKey)

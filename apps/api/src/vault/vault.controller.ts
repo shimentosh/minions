@@ -74,6 +74,7 @@ export class VaultService {
       pendingProtectedVaultKey: vault.pendingProtectedKey,
       publicKey: user.publicKey,
       protectedPrivateKey: user.protectedPrivateKey,
+      emailRecoveryNeeded: user.emailRecovery && !user.recoveryKeyEnc,
     };
   }
 

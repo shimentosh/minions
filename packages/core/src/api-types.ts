@@ -48,6 +48,11 @@ export interface VaultKeys {
   /** Sharing key pair (see asym.ts). Null until the client first creates one. */
   publicKey?: string | null;
   protectedPrivateKey?: string | null;
+  /**
+   * Email reset is on but the server has no copy of the user key yet: the
+   * client sends it once the vault is open (see POST /auth/email-recovery/key).
+   */
+  emailRecoveryNeeded?: boolean;
 }
 
 export interface AuthResult {
@@ -74,6 +79,8 @@ export interface MeResponse {
     name: string;
     twoFactorEnabled: boolean;
     passkeyCount: number;
+    /** A forgotten master password can be reset by email, keeping the vault. */
+    emailRecovery: boolean;
     createdAt: string;
     previousVisitAt: string | null;
   } & UserSettings;

@@ -56,7 +56,7 @@ export const ACTION_LABELS: Record<string, string> = {
   "auth.login_failed": "Failed sign-in",
   "auth.registered": "Account created",
   "auth.account_reset": "Account reset",
-  "auth.password_recovered": "Master password reset with a backup code",
+  "auth.password_recovered": "Forgotten master password reset",
   "device.added": "Device added",
   "device.linked": "Extension connected",
   "device.revoked": "Device revoked",
@@ -101,5 +101,7 @@ export const SECURITY_EVENT_LABELS: Record<string, string> = {
   email_verified: "Email address confirmed",
   account_reset: "Account reset after a forgotten master password",
   backup_codes_created: "Backup codes created",
-  master_password_recovered: "Master password reset with a backup code",
+  master_password_recovered: "Forgotten master password reset",
+  email_recovery_enabled: "Email reset turned on",
+  email_recovery_disabled: "Email reset turned off",
 };

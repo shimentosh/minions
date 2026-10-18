@@ -86,6 +86,8 @@ export const SECURITY_EVENTS = [
   "email_verified",
   "backup_codes_created",
   "master_password_recovered",
+  "email_recovery_enabled",
+  "email_recovery_disabled",
 ] as const;
 export type SecurityEventType = (typeof SECURITY_EVENTS)[number];
 

@@ -13,6 +13,14 @@ can serve malicious JavaScript to the web app and capture the master password
 at the next unlock. That is the limit of any browser-delivered end-to-end
 encryption, and the reason it is not called "zero-knowledge" without that caveat.
 
+**Email reset is a deliberate exception.** It is on by default so a forgotten
+master password works as in most apps: the server keeps each account's user
+key encrypted with `SERVER_ENCRYPTION_KEY` (`users.recoveryKeyEnc`). For
+accounts with it on, whoever holds that key *and* the database can open the
+vault, and so can whoever controls the mailbox (plus the second factor, when
+2FA is on). Turning email reset off in Settings → Security deletes the copy
+and restores full end-to-end encryption for that account.
+
 ## Assets
 
 | Asset | Where it lives | Protection |
@@ -23,6 +31,7 @@ encryption, and the reason it is not called "zero-knowledge" without that caveat
 | Usernames, item names, hosts, tags, projects | Plaintext columns | Server-side authorization only. **Readable from a DB dump** (see R1). |
 | Session tokens | Client: HttpOnly cookie (web), OS keychain (desktop), the extension origin's IndexedDB (extension; unreadable by content scripts, so it stays signed in across restarts while the vault key does not persist) | 256-bit random; DB stores SHA-256 only; revocable; 30-day expiry. |
 | Account TOTP secret | `users.twoFactorSecretEnc` | AES-GCM under `SERVER_ENCRYPTION_KEY`. Readable by whoever holds that key. |
+| User key copy for email reset | `users.recoveryKeyEnc` (accounts with email reset on, the default) | AES-GCM under `SERVER_ENCRYPTION_KEY`, AAD bound to the user. **With that key and a DB dump, the vault is readable.** Deleted when email reset is turned off. |
 | Recovery codes | `recovery_codes` | SHA-256 of 50-bit random codes, single use. |
 | Audit logs | `activity_logs`, `security_events` | Metadata whitelist (ids, counts, labels); never values. Include IP and user agent. |
 
@@ -140,14 +149,31 @@ limit. They are listed so nobody mistakes them for solved.
 
 ## Recovery and lifecycle
 
-- **Forgotten master password:** the vault cannot be recovered, by design.
-  Nobody, including the server operator, can decrypt it. 2FA recovery codes
+- **Forgotten master password, by email** (the default): "Forgot password?"
+  emails a single-use link (32 random bytes in the URL fragment, SHA-256
+  stored, 1 hour, one link at a time, at most one email per 2 minutes per
+  account). The request answers the same, and sends after responding,
+  whether or not the account exists. Opening the link, plus a TOTP or 2FA
+  recovery code when 2FA is on, returns the user key the server kept; the
+  page wraps it under a new master password and must finish within 15
+  minutes. As with a backup code, nothing is re-encrypted or deleted, the
+  link is spent atomically, other sessions are revoked, and the account is
+  emailed. The client hands over the user key after an unlock when the
+  server has none; the server first checks that it opens the vault key, and
+  never replaces a kept one. Turning email reset off needs the master
+  password, deletes the copy and any open link; turning it on needs the
+  master password too. Accounts with only a passkey are not asked for it
+  here, so for them the mailbox alone is enough. Tested in
+  `email-reset.test.ts`.
+- **Forgotten master password, without email reset:** the vault cannot be
+  recovered without a backup code. Nobody, including the server operator, can
+  decrypt it. 2FA recovery codes
   recover the *second factor* only, not the vault. **Backup codes** recover
   the vault: the client makes 8 codes of 100 random bits each, and for each
   one wraps the user key with an HKDF-derived key and sends a separate
   HKDF-derived proof. The server stores the wrapped key and the SHA-256 of
   the proof, so it can check a code but never open the key. "Forgot
-  password?" (sign-in and lock screens) takes the email and a code, opens the
+  password?" → "Use a backup code" (sign-in and lock screens) takes the email and a code, opens the
   user key on the device and wraps it under a new master password. Nothing
   is re-encrypted or deleted: the vault, workspace memberships, shares and
   the sharing key pair stay. The code is spent atomically, other sessions

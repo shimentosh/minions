@@ -6,6 +6,7 @@ import {
   decryptBytes,
   deriveMasterKeys,
   encryptBytes,
+  fromBase64,
   generateKey,
   generateUserKeyPair,
   importPrivateKey,
@@ -164,6 +165,8 @@ interface SessionState {
     password: string;
     code?: string;
   }) => Promise<void>;
+  /** Forgotten master password: the emailed link opens the vault, which gets a new master password. */
+  resetPassword: (input: { token: string; password: string; code?: string }) => Promise<void>;
   login: (input: { email: string; password: string }) => Promise<"ok" | "two_factor_required">;
   verifyTwoFactor: (code: string) => Promise<void>;
   verifyPasskey: () => Promise<void>;
@@ -177,6 +180,16 @@ interface SessionState {
 // Between the password step and the 2FA step we hold the stretched key, so
 // the user does not type the master password twice.
 let pendingStretchedKey: Uint8Array<ArrayBuffer> | null = null;
+
+/**
+ * Email reset is on but the server has no copy of the user key yet (a new
+ * account, or one from before email reset): hand it over now. Best effort;
+ * the next unlock tries again.
+ */
+async function keepForEmailReset(userKey: Uint8Array<ArrayBuffer>, keys: VaultKeys) {
+  if (!keys.emailRecoveryNeeded) return;
+  await post("/auth/email-recovery/key", { userKey: toBase64(userKey) }).catch(() => undefined);
+}
 
 async function openVault(stretchedKey: Uint8Array<ArrayBuffer>, keys: VaultKeys) {
   const userKey = await unwrapKey(stretchedKey, keys.protectedUserKey, aad.userKey(keys.userId));
@@ -203,6 +216,7 @@ async function openVault(stretchedKey: Uint8Array<ArrayBuffer>, keys: VaultKeys)
     wipe(vaultKey);
     vaultKey = next;
     await openSharing(userKey, keys);
+    await keepForEmailReset(userKey, keys);
   } finally {
     wipe(userKey);
   }
@@ -308,9 +322,74 @@ async function openFreshVault(
       protectedUserKey: keys.protectedUserKey,
       protectedVaultKey: keys.protectedVaultKey,
     });
+    if (result.keys) await keepForEmailReset(keys.userKey, result.keys);
   } finally {
     wipe(keys.userKey);
   }
+}
+
+/** Wraps the recovered user key under a new master password, then opens the vault with it. */
+async function setForgottenPassword(
+  userKey: Uint8Array<ArrayBuffer>,
+  userId: string,
+  password: string,
+  path: string,
+  body: Record<string, string>,
+) {
+  const kdf = newKdfParams();
+  const { authKey, stretchedKey } = await deriveMasterKeys(password, kdf);
+  try {
+    const result = await post<AuthResult>(path, {
+      ...body,
+      authKey,
+      kdf,
+      protectedUserKey: await wrapKey(stretchedKey, userKey, aad.userKey(userId)),
+      device: deviceInfo(),
+    });
+    if (result.token) {
+      setBearerToken(result.token);
+      rememberDesktopSession(result.token);
+    }
+    closeVault();
+    await openVault(stretchedKey, result.keys!);
+  } finally {
+    wipe(userKey);
+    wipe(stretchedKey);
+  }
+}
+
+/** Emails a reset link. Answers the same whether or not the account exists. */
+export async function requestPasswordReset(email: string) {
+  await post("/auth/reset/request", { email });
+}
+
+/**
+ * Settings → Security. Off deletes the server's copy of the user key; on
+ * hands it over again, which needs the master password to open it here.
+ */
+export async function setEmailRecovery(password: string, enabled: boolean) {
+  const keys = await get<VaultKeys>("/vault/keys");
+  const { authKey, stretchedKey } = await deriveMasterKeys(password, keys.kdf);
+  let userKey: Uint8Array<ArrayBuffer> | null = null;
+  try {
+    if (enabled)
+      userKey = await unwrapKey(
+        stretchedKey,
+        keys.protectedUserKey,
+        aad.userKey(keys.userId),
+      ).catch(() => {
+        throw new Error("Master password is incorrect");
+      });
+    await post("/auth/email-recovery", {
+      authKey,
+      enabled,
+      ...(userKey ? { userKey: toBase64(userKey) } : {}),
+    });
+  } finally {
+    wipe(userKey);
+    wipe(stretchedKey);
+  }
+  useSession.getState().setSettings({ emailRecovery: enabled });
 }
 
 /** Checks a backup code for this email before a new master password is chosen. */
@@ -365,28 +444,25 @@ export const useSession = create<SessionState>((set, getState) => ({
     // The code opens the same user key the old password did, so the vault,
     // workspaces and shares are untouched; only its wrapping changes.
     const userKey = await unwrapWithBackupCode(backupCode, protectedUserKey, userId);
-    const kdf = newKdfParams();
-    const { authKey, stretchedKey } = await deriveMasterKeys(password, kdf);
-    try {
-      const result = await post<AuthResult>("/auth/recover/complete", {
-        email,
-        proof,
-        ...(code ? { code } : {}),
-        authKey,
-        kdf,
-        protectedUserKey: await wrapKey(stretchedKey, userKey, aad.userKey(userId)),
-        device: deviceInfo(),
-      });
-      if (result.token) {
-        setBearerToken(result.token);
-        rememberDesktopSession(result.token);
-      }
-      closeVault();
-      await openVault(stretchedKey, result.keys!);
-    } finally {
-      wipe(userKey);
-      wipe(stretchedKey);
-    }
+    await setForgottenPassword(userKey, userId, password, "/auth/recover/complete", {
+      email,
+      proof,
+      ...(code ? { code } : {}),
+    });
+    await getState().refresh();
+  },
+
+  async resetPassword({ token, password, code }) {
+    // The server kept the user key for email reset, so, as with a backup
+    // code, only the master password changes.
+    const opened = await post<{ userId: string; userKey: string }>("/auth/reset/open", {
+      token,
+      ...(code ? { code } : {}),
+    });
+    const userKey = fromBase64(opened.userKey);
+    await setForgottenPassword(userKey, opened.userId, password, "/auth/reset/complete", {
+      token,
+    });
     await getState().refresh();
   },
 

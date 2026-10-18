@@ -1,13 +1,17 @@
 import { randomBytes } from "node:crypto";
 import {
   type AuthResult,
+  aad,
   base32Encode,
   DEFAULT_KDF,
+  fromBase64,
   type KdfParams,
   type MeResponse,
   totpUri,
+  unwrapKey,
   type VaultKeys,
   verifyTotp,
+  wipe,
 } from "@minions/core";
 import {
   BadRequestException,
@@ -22,8 +26,9 @@ import { Algorithm, hash, verify } from "@node-rs/argon2";
 import { ActivityService } from "../activity/activity.service";
 import type { AuthContext, ClientInfo } from "../common/auth-context";
 import { PrismaService } from "../common/prisma.service";
-import { hmac, serverDecrypt, serverEncrypt, sha256 } from "../common/server-crypto";
+import { hmac, newToken, serverDecrypt, serverEncrypt, sha256 } from "../common/server-crypto";
 import { loadConfig } from "../config";
+import type { Prisma } from "../generated/prisma/client";
 import { Mailer } from "../mail/mailer";
 import { SessionsService } from "../sessions/sessions.service";
 import type {
@@ -34,6 +39,8 @@ import type {
   RecoverCheckDto,
   RecoverCompleteDto,
   RegisterDto,
+  ResetCompleteDto,
+  ResetOpenDto,
 } from "./auth.dto";
 import { EmailVerificationService } from "./email-verification";
 
@@ -43,6 +50,20 @@ const LOCK_AFTER = 5;
 const LOCK_MINUTES = [1, 5, 15, 60];
 const MAX_2FA_ATTEMPTS = 5;
 const RECOVERY_CODE_COUNT = 10;
+const RESET_TTL_MS = 60 * 60_000;
+/** A reset link asked for again within this long is not re-sent, so nobody can flood an inbox. */
+const RESET_COOLDOWN_MS = 2 * 60_000;
+/** After the link opens the user key, the new master password must follow within this long. */
+const RESET_OPEN_MS = 15 * 60_000;
+
+const recoveryContext = (userId: string) => `user:${userId}:recovery`;
+
+function badResetLink() {
+  return new BadRequestException({
+    message: "This reset link is invalid or has expired. Request a new one.",
+    code: "BAD_RESET_LINK",
+  });
+}
 
 function badBackupCode() {
   return new BadRequestException({
@@ -109,6 +130,8 @@ export class AuthService {
       protectedUserKey: string;
       publicKey?: string | null;
       protectedPrivateKey?: string | null;
+      emailRecovery: boolean;
+      recoveryKeyEnc: string | null;
     },
     vault: { id: string; protectedKey: string; pendingProtectedKey?: string | null },
   ): VaultKeys {
@@ -127,6 +150,7 @@ export class AuthService {
       pendingProtectedVaultKey: vault.pendingProtectedKey ?? null,
       publicKey: user.publicKey ?? null,
       protectedPrivateKey: user.protectedPrivateKey ?? null,
+      emailRecoveryNeeded: user.emailRecovery && !user.recoveryKeyEnc,
     };
   }
 
@@ -420,6 +444,7 @@ export class AuthService {
         name: user.name,
         twoFactorEnabled: user.twoFactorEnabled,
         passkeyCount: await this.prisma.webauthnCredential.count({ where: { userId: user.id } }),
+        emailRecovery: user.emailRecovery,
         createdAt: user.createdAt.toISOString(),
         previousVisitAt: user.previousVisitAt?.toISOString() ?? null,
         autoLockMinutes: user.autoLockMinutes,
@@ -615,22 +640,79 @@ export class AuthService {
   async recoverWithBackupCode(dto: RecoverCompleteDto, client: ClientInfo): Promise<AuthOutcome> {
     const row = await this.backupCodeFor(dto.email, dto.proof);
     const user = row.user;
-    if (user.twoFactorEnabled) {
-      this.assertNotLocked(user);
-      const actor = { userId: user.id, ...client };
-      if (!dto.code || !(await this.checkSecondFactor(user, dto.code, actor))) {
-        await this.registerFailure(user.id, client, "2fa");
-        throw new UnauthorizedException({ message: "Invalid code", code: "BAD_2FA_CODE" });
-      }
+    await this.checkRecoverySecondFactor(user, dto.code, client);
+    const { outcome, actor } = await this.replaceForgottenPassword(
+      user,
+      dto,
+      client,
+      async (tx) => {
+        // One conditional UPDATE: a code works once, even if submitted twice at the same time.
+        const used = await tx.backupCode.updateMany({
+          where: { id: row.id, usedAt: null },
+          data: { usedAt: new Date() },
+        });
+        if (used.count !== 1) throw badBackupCode();
+      },
+    );
+    const remaining = await this.prisma.backupCode.count({
+      where: { userId: user.id, usedAt: null },
+    });
+    await this.activity.log(actor, "auth.password_recovered", { metadata: { via: "backup" } });
+    await this.activity.securityEvent(actor, "master_password_recovered", "critical", {
+      count: remaining,
+      via: "backup",
+    });
+    await this.mailer
+      .send({
+        to: user.email,
+        subject: "Your Minions master password was changed",
+        text: [
+          "A backup code was used to set a new master password for your Minions account. Your vault was not changed, and every other device was signed out.",
+          "",
+          `You have ${remaining} unused backup code${remaining === 1 ? "" : "s"} left. Make a new set in Settings → Security when you run low.`,
+          "",
+          "If you did not do this, someone has one of your backup codes. Sign in, change your master password, and make new backup codes.",
+        ].join("\n"),
+      })
+      .catch(() => undefined);
+    return outcome;
+  }
+
+  /** With two-factor sign-in on, a forgotten password is replaced only with the second factor too. */
+  private async checkRecoverySecondFactor(
+    user: {
+      id: string;
+      twoFactorEnabled: boolean;
+      twoFactorSecretEnc: string | null;
+      lockedUntil: Date | null;
+    },
+    code: string | undefined,
+    client: ClientInfo,
+  ) {
+    if (!user.twoFactorEnabled) return;
+    this.assertNotLocked(user);
+    if (!code || !(await this.checkSecondFactor(user, code, { userId: user.id, ...client }))) {
+      await this.registerFailure(user.id, client, "2fa");
+      throw new UnauthorizedException({ message: "Invalid code", code: "BAD_2FA_CODE" });
     }
+  }
+
+  /**
+   * The last step of every recovery: the same user key, wrapped under a new
+   * master password, so the vault, workspaces and shares stay as they were.
+   * `consume` uses up the code or link in the same transaction. Every other
+   * session ends and the lockout clears.
+   */
+  private async replaceForgottenPassword(
+    user: { id: string; vaults: { id: string; protectedKey: string }[] },
+    dto: { authKey: string; kdf: KdfParams; protectedUserKey: string; device: DeviceDto },
+    client: ClientInfo,
+    consume: (tx: Prisma.TransactionClient) => Promise<void>,
+    data: Prisma.UserUpdateInput = {},
+  ) {
     const authHash = await hash(dto.authKey, ARGON);
     const fresh = await this.prisma.$transaction(async (tx) => {
-      // One conditional UPDATE: a code works once, even if submitted twice at the same time.
-      const used = await tx.backupCode.updateMany({
-        where: { id: row.id, usedAt: null },
-        data: { usedAt: new Date() },
-      });
-      if (used.count !== 1) throw badBackupCode();
+      await consume(tx);
       await tx.session.updateMany({
         where: { userId: user.id, revokedAt: null },
         data: { revokedAt: new Date(), vaultUnlockedUntil: null },
@@ -638,6 +720,7 @@ export class AuthService {
       return tx.user.update({
         where: { id: user.id },
         data: {
+          ...data,
           authHash,
           kdfMemory: dto.kdf.memory,
           kdfIterations: dto.kdf.iterations,
@@ -658,30 +741,230 @@ export class AuthService {
       fresh.autoLockMinutes,
     );
     await this.markVisit(user.id);
-    const remaining = await this.prisma.backupCode.count({
-      where: { userId: user.id, usedAt: null },
+    return {
+      actor: { userId: user.id, deviceId: device.id, sessionId: id, ...client },
+      outcome: this.outcome(dto.device, token, {
+        status: "ok",
+        keys: this.keysFor(fresh, user.vaults[0]!),
+      }),
+    };
+  }
+
+  // ─── Email reset (forgotten master password) ───────────────────────────────
+  //
+  // Like most apps: a link sent to the account's email sets a new master
+  // password, and the vault stays. That works because, while email reset is
+  // on (the default), the server keeps the user key encrypted with
+  // SERVER_ENCRYPTION_KEY. So for these accounts the vault is not end-to-end
+  // encrypted against the server: whoever has the server's key and database,
+  // or the mailbox plus the second factor, can open it. Turning email reset
+  // off in Settings deletes the server's copy; backup codes still work.
+
+  /**
+   * Emails a reset link if the address has an account. The caller answers
+   * before this runs, so neither the response nor its timing says whether
+   * the account exists. A new link replaces the last unused one.
+   */
+  async requestReset(email: string): Promise<void> {
+    const user = await this.prisma.user.findUnique({
+      where: { email: this.normalizeEmail(email) },
+      select: { id: true, email: true, emailRecovery: true, recoveryKeyEnc: true },
     });
-    const actor = { userId: user.id, deviceId: device.id, sessionId: id, ...client };
-    await this.activity.log(actor, "auth.password_recovered");
+    if (!user) return;
+    const recent = await this.prisma.accountReset.count({
+      where: { userId: user.id, createdAt: { gt: new Date(Date.now() - RESET_COOLDOWN_MS) } },
+    });
+    if (recent) return;
+    const token = newToken();
+    const ready = user.emailRecovery && !!user.recoveryKeyEnc;
+    await this.prisma.$transaction([
+      this.prisma.accountReset.deleteMany({ where: { userId: user.id, usedAt: null } }),
+      // Without a key to restore there is no link, but the row still starts the cooldown.
+      this.prisma.accountReset.create({
+        data: {
+          userId: user.id,
+          tokenHash: sha256(token),
+          expiresAt: new Date(Date.now() + (ready ? RESET_TTL_MS : 0)),
+        },
+      }),
+    ]);
+    if (!ready) {
+      await this.mailer.send({
+        to: user.email,
+        subject: "Resetting your Minions master password",
+        text: [
+          "Someone asked to reset the master password for the Minions account at this address.",
+          "",
+          user.emailRecovery
+            ? "Email reset isn't ready for this account yet: it switches on the next time the vault is unlocked on any device."
+            : "Email reset is turned off for this account (Settings → Security), so a link can't reset it.",
+          "",
+          'If you have backup codes, open "Forgot password?" on the sign-in page and choose "Use a backup code". If you remember your master password, ignore this email.',
+        ].join("\n"),
+      });
+      return;
+    }
+    await this.mailer.send({
+      to: user.email,
+      subject: "Reset your Minions master password",
+      text: [
+        "Someone asked to reset the master password for the Minions account at this address.",
+        "",
+        "To choose a new one, open this link. Your vault, workspaces and shares stay as they are.",
+        "",
+        `${loadConfig().mail.publicWebUrl}/reset-password#${token}`,
+        "",
+        "It works once and expires in 1 hour. If you didn't ask for this, ignore this email and nothing changes. Minions will never ask for your master password by email.",
+      ].join("\n"),
+    });
+  }
+
+  private async resetRow(token: string) {
+    const row = await this.prisma.accountReset.findUnique({
+      where: { tokenHash: sha256(token) },
+      include: { user: { include: { vaults: { orderBy: { createdAt: "asc" }, take: 1 } } } },
+    });
+    if (!row || row.usedAt || row.expiresAt <= new Date()) throw badResetLink();
+    return row;
+  }
+
+  /** What the reset page needs before the person chooses a new master password. */
+  async checkReset(token: string) {
+    const { user } = await this.resetRow(token);
+    return { email: user.email, twoFactorRequired: user.twoFactorEnabled };
+  }
+
+  /**
+   * Hands the user key back to the reset page, after the second factor when
+   * 2FA is on. The page wraps it under the new master password and completes
+   * within RESET_OPEN_MS.
+   */
+  async openReset(dto: ResetOpenDto, client: ClientInfo) {
+    const row = await this.resetRow(dto.token);
+    const user = row.user;
+    if (!user.emailRecovery || !user.recoveryKeyEnc)
+      throw new BadRequestException({
+        message: "Email reset is off for this account. Use a backup code instead.",
+        code: "EMAIL_RESET_OFF",
+      });
+    await this.checkRecoverySecondFactor(user, dto.code, client);
+    await this.prisma.accountReset.update({
+      where: { id: row.id },
+      data: { openedAt: new Date() },
+    });
+    return {
+      userId: user.id,
+      userKey: serverDecrypt(user.recoveryKeyEnc, recoveryContext(user.id)),
+    };
+  }
+
+  async completeReset(dto: ResetCompleteDto, client: ClientInfo): Promise<AuthOutcome> {
+    const row = await this.resetRow(dto.token);
+    const user = row.user;
+    const openedSince = new Date(Date.now() - RESET_OPEN_MS);
+    if (!row.openedAt || row.openedAt < openedSince) throw badResetLink();
+    const { outcome, actor } = await this.replaceForgottenPassword(
+      user,
+      dto,
+      client,
+      async (tx) => {
+        // One conditional UPDATE: a link works once, even if submitted twice at the same time.
+        const used = await tx.accountReset.updateMany({
+          where: {
+            id: row.id,
+            usedAt: null,
+            expiresAt: { gt: new Date() },
+            openedAt: { gt: openedSince },
+          },
+          data: { usedAt: new Date() },
+        });
+        if (used.count !== 1) throw badResetLink();
+      },
+      // Opening the link proved the address.
+      { emailVerifiedAt: user.emailVerifiedAt ?? new Date() },
+    );
+    await this.activity.log(actor, "auth.password_recovered", { metadata: { via: "email" } });
     await this.activity.securityEvent(actor, "master_password_recovered", "critical", {
-      count: remaining,
+      via: "email",
     });
     await this.mailer
       .send({
         to: user.email,
         subject: "Your Minions master password was changed",
         text: [
-          "A backup code was used to set a new master password for your Minions account. Your vault was not changed, and every other device was signed out.",
+          "A reset link was used to set a new master password for your Minions account. Your vault was not changed, and every other device was signed out.",
           "",
-          `You have ${remaining} unused backup code${remaining === 1 ? "" : "s"} left. Make a new set in Settings → Security when you run low.`,
-          "",
-          "If you did not do this, someone has one of your backup codes. Sign in, change your master password, and make new backup codes.",
+          "If you did not do this, someone can read your email. Secure your email account first, then reset your Minions master password again from the sign-in page.",
         ].join("\n"),
       })
       .catch(() => undefined);
-    return this.outcome(dto.device, token, {
-      status: "ok",
-      keys: this.keysFor(fresh, user.vaults[0]!),
+    return outcome;
+  }
+
+  /** The submitted key must open this account's personal vault key before the server keeps it. */
+  private async assertUserKey(userId: string, userKey: string) {
+    const vault = await this.prisma.vault.findFirstOrThrow({
+      where: { userId },
+      orderBy: { createdAt: "asc" },
+      select: { id: true, protectedKey: true },
     });
+    const key = fromBase64(userKey);
+    try {
+      wipe(await unwrapKey(key, vault.protectedKey, aad.vaultKey(vault.id)));
+    } catch {
+      throw new BadRequestException("That key doesn't open this vault");
+    } finally {
+      wipe(key);
+    }
+  }
+
+  /**
+   * Sent by the client once the vault is open, when email reset is on but the
+   * server has no copy of the user key yet (new accounts, and accounts from
+   * before email reset). Never replaces a key already kept.
+   */
+  async storeRecoveryKey(auth: AuthContext, userKey: string) {
+    const user = await this.prisma.user.findUniqueOrThrow({
+      where: { id: auth.userId },
+      select: { emailRecovery: true, recoveryKeyEnc: true },
+    });
+    if (!user.emailRecovery || user.recoveryKeyEnc) return;
+    await this.assertUserKey(auth.userId, userKey);
+    await this.prisma.user.updateMany({
+      where: { id: auth.userId, emailRecovery: true, recoveryKeyEnc: null },
+      data: { recoveryKeyEnc: serverEncrypt(userKey, recoveryContext(auth.userId)) },
+    });
+  }
+
+  /** Settings → Security. Turning it off deletes the server's copy of the user key. */
+  async setEmailRecovery(
+    auth: AuthContext,
+    dto: { authKey: string; enabled: boolean; userKey?: string },
+  ) {
+    await this.verifyAuthKey(auth, dto.authKey);
+    if (dto.enabled) {
+      if (!dto.userKey) throw new BadRequestException("The user key is required");
+      await this.assertUserKey(auth.userId, dto.userKey);
+      await this.prisma.user.update({
+        where: { id: auth.userId },
+        data: {
+          emailRecovery: true,
+          recoveryKeyEnc: serverEncrypt(dto.userKey, recoveryContext(auth.userId)),
+        },
+      });
+    } else {
+      await this.prisma.$transaction([
+        this.prisma.user.update({
+          where: { id: auth.userId },
+          data: { emailRecovery: false, recoveryKeyEnc: null },
+        }),
+        this.prisma.accountReset.deleteMany({ where: { userId: auth.userId, usedAt: null } }),
+      ]);
+    }
+    await this.activity.securityEvent(
+      auth,
+      dto.enabled ? "email_recovery_enabled" : "email_recovery_disabled",
+      dto.enabled ? "warning" : "info",
+    );
   }
 }

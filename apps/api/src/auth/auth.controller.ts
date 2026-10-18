@@ -1,5 +1,5 @@
 import type { AuthResult } from "@minions/core";
-import { Body, Controller, Get, HttpCode, Post, Res } from "@nestjs/common";
+import { Body, Controller, Get, HttpCode, Logger, Post, Res, UseGuards } from "@nestjs/common";
 import { Throttle } from "@nestjs/throttler";
 import type { Response } from "express";
 import {
@@ -12,18 +12,25 @@ import {
   SESSION_COOKIE,
   SESSION_COOKIE_OPTIONS,
 } from "../common/auth-context";
+import { VaultUnlockedGuard } from "../common/guards";
 import { loadConfig } from "../config";
 import {
   AuthKeyDto,
   BackupCodesDto,
   ChangePasswordDto,
   DisableTwoFactorDto,
+  EmailRecoveryDto,
   EnableTwoFactorDto,
   LoginDto,
   PreloginDto,
   RecoverCheckDto,
   RecoverCompleteDto,
+  RecoveryKeyDto,
   RegisterDto,
+  ResetCompleteDto,
+  ResetOpenDto,
+  ResetRequestDto,
+  ResetTokenDto,
   TwoFactorVerifyDto,
 } from "./auth.dto";
 import { type AuthOutcome, AuthService } from "./auth.service";
@@ -44,6 +51,8 @@ function send(res: Response, outcome: AuthOutcome): AuthResult {
 
 @Controller("auth")
 export class AuthController {
+  private readonly logger = new Logger("PasswordReset");
+
   constructor(private readonly auth: AuthService) {}
 
   @Public()
@@ -96,6 +105,48 @@ export class AuthController {
     @Res({ passthrough: true }) res: Response,
   ) {
     return send(res, await this.auth.recoverWithBackupCode(dto, client));
+  }
+
+  /** Forgotten master password, by email. Answers the same whether or not the account exists. */
+  @Public()
+  @Throttle({ default: { limit: 3, ttl: 10 * 60_000 } })
+  @Post("reset/request")
+  @HttpCode(202)
+  requestReset(@Body() dto: ResetRequestDto) {
+    // Runs after the response, so its timing cannot tell whether the account exists.
+    void this.auth
+      .requestReset(dto.email)
+      .catch((e) =>
+        this.logger.error(`Reset request failed: ${e instanceof Error ? e.name : "error"}`),
+      );
+  }
+
+  @Public()
+  @Throttle(AUTH_THROTTLE)
+  @Post("reset/check")
+  @HttpCode(200)
+  checkReset(@Body() dto: ResetTokenDto) {
+    return this.auth.checkReset(dto.token);
+  }
+
+  @Public()
+  @Throttle({ default: { limit: 5, ttl: 60_000 } })
+  @Post("reset/open")
+  @HttpCode(200)
+  openReset(@Body() dto: ResetOpenDto, @Client() client: ClientInfo) {
+    return this.auth.openReset(dto, client);
+  }
+
+  @Public()
+  @Throttle({ default: { limit: 5, ttl: 60_000 } })
+  @Post("reset/complete")
+  @HttpCode(200)
+  async completeReset(
+    @Body() dto: ResetCompleteDto,
+    @Client() client: ClientInfo,
+    @Res({ passthrough: true }) res: Response,
+  ) {
+    return send(res, await this.auth.completeReset(dto, client));
   }
 
   @AllowPending2fa()
@@ -162,6 +213,23 @@ export class AuthController {
   @HttpCode(204)
   async replaceBackupCodes(@Auth() auth: AuthContext, @Body() dto: BackupCodesDto) {
     await this.auth.replaceBackupCodes(auth, dto);
+  }
+
+  /** The client hands over the user key once, so a reset link can restore the vault. */
+  @UseGuards(VaultUnlockedGuard)
+  @Throttle(AUTH_THROTTLE)
+  @Post("email-recovery/key")
+  @HttpCode(204)
+  async storeRecoveryKey(@Auth() auth: AuthContext, @Body() dto: RecoveryKeyDto) {
+    await this.auth.storeRecoveryKey(auth, dto.userKey);
+  }
+
+  @UseGuards(VaultUnlockedGuard)
+  @Throttle(AUTH_THROTTLE)
+  @Post("email-recovery")
+  @HttpCode(204)
+  async setEmailRecovery(@Auth() auth: AuthContext, @Body() dto: EmailRecoveryDto) {
+    await this.auth.setEmailRecovery(auth, dto);
   }
 
   @Throttle(AUTH_THROTTLE)

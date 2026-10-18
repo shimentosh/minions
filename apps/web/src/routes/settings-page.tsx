@@ -42,7 +42,7 @@ import {
   restoreBackup,
 } from "@/lib/backup-restore";
 import { useInvalidateVault } from "@/lib/queries";
-import { rotateVaultKey, useSession } from "@/lib/session";
+import { rotateVaultKey, setEmailRecovery, useSession } from "@/lib/session";
 import { type Theme, useTheme } from "@/lib/theme";
 import { toast } from "@/lib/toast";
 
@@ -521,6 +521,80 @@ function RestoreBackup() {
  * Backup codes for a forgotten master password. Each wraps the user key on
  * this device, so using one sets a new password and keeps the whole vault.
  */
+/**
+ * On by default, like most apps. While on, the server keeps a copy of the
+ * user key so a link to the account's email can restore the vault; turning
+ * it off deletes that copy. Either change needs the master password.
+ */
+function EmailResetSection() {
+  const enabled = useSession((s) => s.me?.user.emailRecovery ?? true);
+  const [open, setOpen] = useState(false);
+  const [password, setPassword] = useState("");
+  const change = useMutation({
+    mutationFn: () => setEmailRecovery(password, !enabled),
+    onSuccess: () => {
+      toast.success(enabled ? "Email reset turned off" : "Email reset turned on");
+      setOpen(false);
+      setPassword("");
+    },
+    onError: (e) => toast.error(errorMessage(e)),
+  });
+
+  return (
+    <Section
+      title="Reset by email"
+      hint="Forgot your master password? A link sent to your email lets you set a new one and keep everything in your vault."
+    >
+      <Row
+        label="Email reset"
+        hint={
+          enabled
+            ? "On. To make this possible, Minions keeps a copy of your vault key, encrypted on its servers. Turn it off to keep your vault readable only by you; backup codes still work."
+            : "Off. Only your master password or a backup code can open your vault. A forgotten master password without a backup code can't be undone."
+        }
+      >
+        <div className="flex items-center gap-1.5">
+          {!enabled && (
+            <Badge variant="warning">
+              <ShieldAlert className="size-3" /> Off
+            </Badge>
+          )}
+          {!open && (
+            <Button size="xs" variant="outline" onClick={() => setOpen(true)}>
+              {enabled ? "Turn off" : "Turn on"}
+            </Button>
+          )}
+        </div>
+      </Row>
+      {open && (
+        <div className="grid gap-2 sm:grid-cols-3">
+          <PasswordInput
+            id="email-reset-pw"
+            value={password}
+            onChange={setPassword}
+            placeholder="Master password"
+            autoComplete="current-password"
+          />
+          <div className="flex gap-1.5">
+            <Button
+              size="sm"
+              variant={enabled ? "destructive" : "default"}
+              loading={change.isPending}
+              disabled={!password}
+              onClick={() => change.mutate()}
+            >
+              {enabled ? "Turn off" : "Turn on"}
+            </Button>
+            <Button size="sm" variant="ghost" onClick={() => setOpen(false)}>
+              Cancel
+            </Button>
+          </div>
+        </div>
+      )}
+    </Section>
+  );
+}
+
 function BackupCodesSection() {
   const status = useQuery({
     queryKey: ["backup-codes"],
@@ -580,7 +654,7 @@ function BackupCodesSection() {
             ? "…"
             : total
               ? `${remaining} of ${total} left`
-              : "Not set up. Without them, a forgotten master password can't be undone."
+              : "Not set up. They work even when email reset is off or your email is out of reach."
         }
       >
         <div className="flex items-center gap-1.5">
@@ -939,6 +1013,7 @@ export function SettingsPage() {
             <TwoFactorSection />
             <PasskeysSection />
             <MasterPasswordSection />
+            <EmailResetSection />
             <BackupCodesSection />
             <VaultKeySection />
           </>

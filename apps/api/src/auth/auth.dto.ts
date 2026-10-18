@@ -4,6 +4,7 @@ import {
   ArrayMinSize,
   IsArray,
   IsBase64,
+  IsBoolean,
   IsEmail,
   IsIn,
   IsInt,
@@ -20,6 +21,8 @@ import {
 } from "class-validator";
 
 const ENVELOPE = /^v1\.[A-Za-z0-9+/]{16}\.[A-Za-z0-9+/]+={0,2}$/;
+/** 32 random bytes, base64url. Only its SHA-256 is stored. */
+const LINK_TOKEN = /^[A-Za-z0-9_-]{43}$/;
 
 export class DeviceDto {
   @IsString() @Length(8, 100) clientDeviceId!: string;
@@ -110,4 +113,36 @@ export class RecoverCompleteDto extends RecoverCheckDto {
   @ValidateNested() @Type(() => KdfDto) kdf!: KdfDto;
   @Matches(ENVELOPE) @MaxLength(200) protectedUserKey!: string;
   @ValidateNested() @Type(() => DeviceDto) device!: DeviceDto;
+}
+
+export class ResetRequestDto {
+  @IsEmail() @MaxLength(254) email!: string;
+}
+
+export class ResetTokenDto {
+  @Matches(LINK_TOKEN) token!: string;
+}
+
+export class ResetOpenDto extends ResetTokenDto {
+  /** Required when the account has two-factor sign-in: a TOTP or recovery code. */
+  @IsOptional() @IsString() @MinLength(6) @MaxLength(20) code?: string;
+}
+
+/** The reset link opened the user key, which the client has wrapped under a new master password. */
+export class ResetCompleteDto extends ResetTokenDto {
+  @IsBase64() @Length(44, 44) authKey!: string;
+  @ValidateNested() @Type(() => KdfDto) kdf!: KdfDto;
+  @Matches(ENVELOPE) @MaxLength(200) protectedUserKey!: string;
+  @ValidateNested() @Type(() => DeviceDto) device!: DeviceDto;
+}
+
+export class RecoveryKeyDto {
+  /** The raw user key, base64. Checked against the vault key before it is kept. */
+  @IsBase64() @Length(44, 44) userKey!: string;
+}
+
+export class EmailRecoveryDto extends AuthKeyDto {
+  @IsBoolean() enabled!: boolean;
+  /** Required when turning it on. */
+  @IsOptional() @IsBase64() @Length(44, 44) userKey?: string;
 }

@@ -5,9 +5,15 @@ import {
   lazyRouteComponent,
   Navigate,
   Outlet,
+  useNavigate,
 } from "@tanstack/react-router";
-import { useEffect } from "react";
-import { LockScreen, SignInScreen, Splash } from "@/components/auth/auth-screens";
+import { useEffect, useState } from "react";
+import {
+  LockScreen,
+  ResetPasswordPage,
+  SignInScreen,
+  Splash,
+} from "@/components/auth/auth-screens";
 import { CommandPalette } from "@/components/command-palette";
 import { AppSidebar } from "@/components/layout/app-sidebar";
 import { ExtensionConnectDialog } from "@/components/layout/extension-connect-dialog";
@@ -99,7 +105,11 @@ function Gate() {
 }
 
 function Root() {
+  const navigate = useNavigate();
   const pathname = window.location.pathname;
+  // A finished password reset goes straight into the vault. A reload would
+  // drop its key, so this switches screens in place.
+  const [resetting, setResetting] = useState(() => pathname === "/reset-password");
   return (
     <ToastProvider position="bottom-right">
       <TooltipProvider delay={400}>
@@ -109,6 +119,13 @@ function Root() {
             <PublicSharePage />
           ) : pathname === "/verify-email" ? (
             <VerifyEmailPage />
+          ) : resetting ? (
+            <ResetPasswordPage
+              onDone={() => {
+                setResetting(false);
+                void navigate({ to: "/vault", replace: true });
+              }}
+            />
           ) : (
             <Gate />
           )}
@@ -235,6 +252,7 @@ const routes = [
   createRoute({ getParentRoute: () => rootRoute, path: "/login", component: ToVault }),
   createRoute({ getParentRoute: () => rootRoute, path: "/register", component: ToVault }),
   createRoute({ getParentRoute: () => rootRoute, path: "/forgot-password", component: ToVault }),
+  createRoute({ getParentRoute: () => rootRoute, path: "/reset-password", component: ToVault }),
 ];
 
 export const router = createRouter({
