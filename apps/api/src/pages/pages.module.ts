@@ -28,6 +28,7 @@ import {
   StreamableFile,
   UseGuards,
 } from "@nestjs/common";
+import { Throttle } from "@nestjs/throttler";
 import { Type } from "class-transformer";
 import {
   ArrayMaxSize,
@@ -458,6 +459,9 @@ export class PagesService {
 
 const Id = (name = "id") => Param(name, new ParseUUIDPipe({ version: "4" }));
 
+/** Per client and route, per minute, for import batches and files (the default is 300). */
+const IMPORT_RATE = 1200;
+
 @UseGuards(VaultUnlockedGuard)
 @Controller("pages")
 export class PagesController {
@@ -469,7 +473,11 @@ export class PagesController {
   @Post() create(@Auth() a: AuthContext, @Body() dto: CreatePageDto) {
     return this.pages.create(a, dto);
   }
-  @Post("batch") @HttpCode(200) createMany(@Auth() a: AuthContext, @Body() dto: BatchCreateDto) {
+  // Imports: a large workspace is many batches and many files in a few minutes.
+  @Throttle({ default: { limit: IMPORT_RATE, ttl: 60_000 } })
+  @Post("batch")
+  @HttpCode(200)
+  createMany(@Auth() a: AuthContext, @Body() dto: BatchCreateDto) {
     return this.pages.createMany(a, dto);
   }
   @Get(":id") get(@Auth() a: AuthContext, @Id() id: string) {
@@ -493,7 +501,10 @@ export class PagesController {
   @Get(":id/versions") versions(@Auth() a: AuthContext, @Id() id: string) {
     return this.pages.versions(a, id);
   }
-  @Put(":id/files/:fileId") @HttpCode(204) async putFile(
+  @Throttle({ default: { limit: IMPORT_RATE, ttl: 60_000 } })
+  @Put(":id/files/:fileId")
+  @HttpCode(204)
+  async putFile(
     @Auth() a: AuthContext,
     @Id() id: string,
     @Id("fileId") fileId: string,
@@ -502,7 +513,10 @@ export class PagesController {
   ) {
     await this.pages.putFile(a, id, fileId, metaEnc, data);
   }
-  @Get(":id/files/:fileId") async getFile(
+  // A page full of images loads them all at once.
+  @Throttle({ default: { limit: IMPORT_RATE, ttl: 60_000 } })
+  @Get(":id/files/:fileId")
+  async getFile(
     @Auth() a: AuthContext,
     @Id() id: string,
     @Id("fileId") fileId: string,

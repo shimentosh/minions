@@ -1,6 +1,6 @@
-import type { DatabaseProperty, PageMeta, PagePropValue } from "@minions/core";
+import type { DatabaseProperty, PageMeta, PagePropValue, UpsertItemRequest } from "@minions/core";
 import { generateKeyBetween, generateNKeysBetween } from "fractional-indexing";
-import { post } from "../api";
+import { ApiError, post } from "../api";
 import { buildNewPage, type PageContent, uploadPageFile } from "../pages/crypto";
 import { encryptDraft } from "../vault-crypto";
 import {
@@ -152,6 +152,30 @@ function propValue(raw: string, type: DatabaseProperty["type"]): PagePropValue {
 
 // ─── Writing ─────────────────────────────────────────────────────────────────
 
+/** Rate limits, server hiccups and dropped connections: worth another try. */
+const transient = (e: unknown) =>
+  e instanceof ApiError && (e.status === 0 || e.status === 429 || e.status >= 500);
+
+/**
+ * Large imports send thousands of requests and can meet the API's rate
+ * limit. Waits and tries again (1, 2, 4… up to 30 s), a few times.
+ */
+export async function retrying<T>(
+  run: () => Promise<T>,
+  retry: (e: unknown) => boolean,
+  attempts = 6,
+  wait = (ms: number) => new Promise((r) => setTimeout(r, ms)),
+): Promise<T> {
+  for (let i = 0; ; i++) {
+    try {
+      return await run();
+    } catch (e) {
+      if (i + 1 >= attempts || !retry(e)) throw e;
+      await wait(Math.min(1000 * 2 ** i, 30_000));
+    }
+  }
+}
+
 export interface CredentialChoice {
   /** Make a vault item (true) or leave the text in the page (false). */
   vault: boolean;
@@ -250,7 +274,7 @@ async function createItems(plan: ImportPlan, opts: WriteOptions, state: WriteSta
   let failed = 0;
   for (let i = 0; i < chosen.length; i += 100) {
     const slice = chosen.slice(i, i + 100);
-    const entries = [];
+    const entries: { sourceRow: number; item: UpsertItemRequest }[] = [];
     const ids: string[] = [];
     for (const [k, c] of slice.entries()) {
       const choice = opts.choices.get(c.id);
@@ -272,9 +296,13 @@ async function createItems(plan: ImportPlan, opts: WriteOptions, state: WriteSta
         }),
       });
     }
-    const res = await post<{ imported: number; failed: { sourceRow: number }[] }>(
-      `/imports/${job.id}/items`,
-      { entries },
+    // Only a rate limit is retried: after any other failure the items may exist.
+    const res = await retrying(
+      () =>
+        post<{ imported: number; failed: { sourceRow: number }[] }>(`/imports/${job.id}/items`, {
+          entries,
+        }),
+      (e) => e instanceof ApiError && e.status === 429,
     );
     const bad = new Set(res.failed.map((f) => f.sourceRow));
     failed += bad.size;
@@ -312,7 +340,8 @@ export async function writeImport(
   let created = 0;
   const flush = async () => {
     if (!batch.length) return;
-    await post("/pages/batch", { pages: batch });
+    // Safe to repeat: pages already stored are skipped.
+    await retrying(() => post("/pages/batch", { pages: batch }), transient);
     // Only now are these pages stored; a failure before this retries them.
     for (const k of batchKeys) state.pagesDone.add(k);
     created += batch.length;
@@ -500,12 +529,11 @@ export async function writeImport(
         continue;
       }
       const name = f.path.slice(f.path.lastIndexOf("/") + 1);
-      await uploadPageFile(
-        f.pageId,
-        f.key,
-        await file.bytes(),
-        { name, type: mimeOf(name) },
-        f.fileId,
+      const bytes = await file.bytes();
+      // Safe to repeat: the same file id is stored once.
+      await retrying(
+        () => uploadPageFile(f.pageId, f.key, bytes, { name, type: mimeOf(name) }, f.fileId),
+        transient,
       );
       state.filesDone.add(f.fileId);
       uploaded++;

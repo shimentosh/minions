@@ -1,7 +1,41 @@
 // @vitest-environment jsdom
 import { describe, expect, it } from "vitest";
+import { ApiError } from "../api";
 import { exportZip, ID, SECRETS } from "./fixtures";
-import { databaseSchema, inferType, planImport } from "./importer";
+import { databaseSchema, inferType, planImport, retrying } from "./importer";
+
+describe("retrying through rate limits", () => {
+  const noWait = async () => {};
+  it("waits out a 429 and carries on", async () => {
+    let calls = 0;
+    const result = await retrying(
+      async () => {
+        calls++;
+        if (calls < 3) throw new ApiError(429, "Too many requests");
+        return "ok";
+      },
+      (e) => e instanceof ApiError && e.status === 429,
+      6,
+      noWait,
+    );
+    expect(result).toBe("ok");
+    expect(calls).toBe(3);
+  });
+
+  it("does not retry what it was not told to, and gives up eventually", async () => {
+    let calls = 0;
+    const fail = (status: number) => () => {
+      calls++;
+      return Promise.reject(new ApiError(status, "nope"));
+    };
+    const only429 = (e: unknown) => e instanceof ApiError && e.status === 429;
+    await expect(retrying(fail(400), only429, 6, noWait)).rejects.toThrow("nope");
+    expect(calls).toBe(1);
+    calls = 0;
+    await expect(retrying(fail(429), only429, 4, noWait)).rejects.toThrow("nope");
+    expect(calls).toBe(4);
+  });
+});
 
 describe("planning a Notion import", () => {
   it("counts what is there and finds every credential, sending nothing", async () => {
