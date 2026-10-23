@@ -288,12 +288,31 @@ API `apps/api/src/pages`, client `apps/web/src/lib/pages`, importer `apps/web/sr
   (`application/octet-stream`, 25 MiB plus header; nginx allows 26 MB on that route
   only) with the encrypted `{name, type}` in `X-Minions-File-Meta`. Stored in
   PostgreSQL `bytea`.
+- **Archive.** Pages and vault items have a plaintext `archived_at` (like `favorite`,
+  an organising flag). Archiving a page archives everything under it; unarchiving
+  brings back the page, everything under it and the pages above it
+  (`POST /pages/archive`). The tree carries `archivedAt` and the client hides archived
+  pages and their sub-pages from the sidebar and page search; item lists and the
+  palette leave archived items out unless `?archived=include|only`, and say how many
+  they hid. One "Show archived" switch per device (`lib/archive.ts`, a yes/no in
+  `localStorage`). Autofill, opening an item and the Security Center still see
+  archived items. Backups keep the state.
 - **Notion import** runs on the device: zip.js reads the export in place (parts and
   nested zips too), Markdown/HTML go through DOMPurify and the editor schema,
   databases come from the CSV (or the HTML table), and credentials found in pages,
   tables, code blocks and credential databases become vault items through `/imports`,
-  leaving a chip in the page. Pages are written parents-first in batches of up to 100
-  (`POST /pages/batch`, idempotent), files one at a time; both retry through rate
-  limits. Nothing is sent before the person confirms the preview.
+  leaving a chip in the page. Sub-page folders are matched by `<Title> <id>`, or by
+  title or id alone as newer exports write them; CSV rows pair with row pages by
+  title, loosely when file names lost characters. Credential labels may name a
+  service ("Gmail password") or a role ("Admin password"), share a line, sit above
+  their value or fill a two-column table. The same secret for the same account found
+  twice becomes one item (`dedupeKey`), which every page links to; item notes record
+  the Notion path. By default everything created is archived: pages with
+  `{from: "notion", at}` in their encrypted meta, items tagged `notion-import`. Pages
+  are written parents-first in batches of up to 100 (`POST /pages/batch`,
+  idempotent), files one at a time; both retry through rate limits. Nothing is sent
+  before the person confirms the preview. `src/lib/notion/export-stats.test.ts` runs
+  the import's read and convert steps on a real export (`NOTION_EXPORT=…`) and prints
+  aggregate counts only.
 - **Not yet:** pages in team workspaces and sharing a page (phase 3), full-text search
   of content (phase 2).

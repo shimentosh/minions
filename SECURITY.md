@@ -43,7 +43,10 @@ the security review gate are in [THREAT_MODEL.md](THREAT_MODEL.md).
 | Backups include pages, still encrypted | Export carries wrapped page keys and envelopes; restore re-wraps on the device | `pages.test.ts` "includes pages in the encrypted backup", `tests/e2e/backup.mjs` |
 | Import stays on the device | The export is read in the tab; nothing is sent before Import; the plan step makes no request | `importer.test.ts` "…sending nothing", `tests/e2e/pages.mjs` |
 | Imported HTML cannot run | Parsed in an inert `DOMParser` document, sanitised by DOMPurify, then reduced to the editor schema; links only http(s)/mailto or internal ids; no remote images | `convert.test.ts` (scripts, handlers and the page title dropped) |
-| Secrets in imported pages become vault items | Detected on the device, removed from page text, created as encrypted items, a chip left in place | `credentials.test.ts`, `convert.test.ts`, `tests/e2e/pages.mjs` |
+| Secrets in imported pages become vault items | Detected on the device, removed from page text, created as encrypted items, a chip left in place; one item per secret and account however often it is written | `credentials.test.ts`, `convert.test.ts`, `importer.test.ts` "makes one archived, tagged item per credential…", `tests/e2e/pages.mjs` |
+| The import preview shows no secrets | Each credential is listed by name, type, site, account and which fields were found, never their values | `notion-import-page.tsx` (`CredentialRow`) |
+| Archiving leaks nothing about content | Only an `archived_at` timestamp and, on imported items, the `notion-import` tag are plaintext; the page import marker is inside the encrypted meta | `archive.test.ts`, `importer.test.ts` |
+| Archived content is hidden, not lost | Lists, the page tree and search leave it out unless shown; autofill, the Security Center and backups still include it; archive and unarchive are reversible, singly and in bulk | `archive.test.ts`, `tests/e2e/pages.mjs` |
 
 ## Known limits
 

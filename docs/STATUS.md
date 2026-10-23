@@ -15,7 +15,7 @@ What is built, what is still open, and how to use team workspaces and the operat
 | 7 Notes | Done. Rich text (TipTap), encrypted bodies, pin/favorite/archive/trash, tags, projects, collections, version history. |
 | 8 Extension | Done. Site matching, fill, save-on-submit and update-password prompts, search, generator, TOTP, quick save, independent lock. |
 | 9 Desktop | Done. Release build with a Windows installer (`apps/desktop/src-tauri/target/release/bundle/nsis`), tested by driving the real window (`tests/e2e/desktop.mjs`). |
-| 11 Pages (Notion alternative, phase 1) | Done. Encrypted pages with a key per page, nested tree, block editor, files, trash, history kept, rotation and backups, and the Notion workspace importer. Roadmap: [NOTION_ALTERNATIVE_PLAN.md](NOTION_ALTERNATIVE_PLAN.md). |
+| 11 Pages (Notion alternative, phase 1) | Done. Encrypted pages with a key per page, nested tree, block editor, files, trash, history kept, rotation and backups, and the Notion workspace importer (credentials to deduplicated vault items, checked against a real export). Archive for pages and vault items, singly and in bulk, hidden unless shown; imports arrive archived. Roadmap: [NOTION_ALTERNATIVE_PLAN.md](NOTION_ALTERNATIVE_PLAN.md). |
 | 10 Migration | Done. Notion (CSV export), Chrome/Edge, Firefox, Bitwarden CSV/JSON, generic CSV/JSON, with preview, duplicate detection, account-family linking and confirmation. |
 
 ### Since the first version

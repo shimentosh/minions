@@ -154,7 +154,12 @@ limit. They are listed so nobody mistakes them for solved.
   content are ciphertext (stricter than notes, whose titles are plaintext), but a DB
   dump shows how many pages there are, how they nest, their order, which are
   databases, when they changed and how large they are ("a database with 400 rows").
-  Email reset (on by default) covers pages like everything else under the user key.
+  The archive is plaintext by decision, like favorites: a dump shows which pages and
+  items are archived and since when, and that items tagged `notion-import` came from
+  an import (tags were already plaintext, R1). It shows nothing of what they hold;
+  the "imported from Notion" marker on pages is inside the encrypted meta, and item
+  notes naming the source page are an encrypted field. Server-side filtering of
+  item lists needs the flag in the clear. Email reset (on by default) covers pages like everything else under the user key.
   Not yet built: pages in team workspaces and page sharing (needs its own review, as
   R6), page files in backups, a per-account storage quota for page files (PostgreSQL
   `bytea`; an account can store as many 25 MiB files as the disk holds), and a bound

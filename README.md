@@ -63,7 +63,11 @@ and organizes it the way you work: by project, by collection and by tag.
 - **Encrypted end to end, titles included.** Search runs on your device.
 - **Import from Notion:** drop the workspace export (.zip, Markdown & CSV or HTML). The page
   tree, databases, images and files come across, and passwords and API keys found in your
-  pages become proper vault items. You review everything before anything is sent.
+  pages become proper vault items (one per account, however often it was written down),
+  with a link left in the page. You review everything before anything is sent, and what is
+  imported is archived (and tagged `notion-import`) until you want it.
+- **Archive** any page or vault item, one at a time or many at once. Archived things stay
+  out of the sidebar, lists and search until you turn on "Show archived".
 - Plan and roadmap: [docs/NOTION_ALTERNATIVE_PLAN.md](docs/NOTION_ALTERNATIVE_PLAN.md).
 
 ### Security
@@ -211,9 +215,15 @@ pnpm typecheck
 pnpm lint
 pnpm --filter @minions/web test      # page tree, Notion import (parsing, credentials, conversion)
 node tests/e2e/smoke.mjs             # needs `pnpm dev` running
-node tests/e2e/pages.mjs             # pages, editor, lock/unlock, Notion import
+node tests/e2e/pages.mjs             # pages, editor, lock/unlock, Notion import, archive
 pnpm --filter @minions/extension build && node tests/e2e/extension.mjs
 ```
+
+To check the importer against your own Notion export without it leaving the machine,
+`NOTION_EXPORT=/path/to/export.zip pnpm --filter @minions/web exec vitest run export-stats`
+runs the read, detect and convert steps and prints aggregate counts only (pages, depth,
+databases, credentials by type, duplicates, what looked secret but was not taken),
+never page text or secrets.
 
 What is built, what is still open, and guides for team workspaces and the operator
 dashboard: [docs/STATUS.md](docs/STATUS.md).

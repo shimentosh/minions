@@ -3,7 +3,9 @@
 //   node tests/e2e/pages.mjs [screenshotDir]
 // Registers a throwaway account, writes nested pages with the block editor,
 // checks they survive a lock and unlock, imports a small Notion export and
-// checks its passwords became vault items, not page text.
+// checks its passwords became vault items, not page text, and that what it
+// imported is archived: hidden until shown, archived and brought back singly
+// and in bulk.
 import { mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -166,8 +168,48 @@ try {
     .click();
   await page.waitForURL(/\/vault/);
   await page.getByRole("heading", { name: "Office wifi" }).waitFor();
+  // Imported items are archived: the detail says so.
+  await page
+    .getByRole("button", { name: /Archived/ })
+    .first()
+    .waitFor();
+
+  step("imported items are hidden until shown");
   await nav("/vault");
-  await page.getByText("GitHub").first().waitFor();
+  const showArchived = page.getByRole("button", { name: /^Show \d+ archived$/ }).first();
+  await showArchived.waitFor({ timeout: 15_000 });
+  if (await page.getByRole("checkbox", { name: "Select GitHub" }).count())
+    throw new Error("an archived item is listed");
+  await showArchived.click();
+  await page.getByRole("checkbox", { name: "Select GitHub" }).waitFor();
+  await page.getByRole("button", { name: "Hide archived" }).first().click();
+
+  step("unarchive one item, archive it again in bulk");
+  await nav("/vault?archived=true");
+  await page.getByRole("button", { name: "Actions for GitHub" }).click();
+  await page.getByRole("menuitem", { name: "Unarchive" }).click();
+  await nav("/vault");
+  await page.getByRole("checkbox", { name: "Select GitHub" }).click();
+  await page
+    .getByRole("toolbar", { name: "Bulk actions" })
+    .getByRole("button", { name: "Archive" })
+    .click();
+  await page.getByRole("checkbox", { name: "Select GitHub" }).waitFor({ state: "detached" });
+
+  step("imported pages are archived; unarchiving the import brings it back");
+  await nav("/pages");
+  await page.getByPlaceholder("Search page titles…").fill("Team Wiki");
+  await page.getByText("No page title matches.").waitFor();
+  await nav("/pages?view=archived");
+  await page.getByRole("checkbox", { name: "Select Notion" }).check();
+  await page.getByRole("button", { name: /Unarchive 1 page/ }).click();
+  await nav("/pages");
+  await page.getByPlaceholder("Search page titles…").fill("Team Wiki");
+  await page
+    .getByRole("link", { name: /Team Wiki/ })
+    .first()
+    .waitFor();
+  await shot("pages-05-unarchived");
 
   if (errors.length) throw new Error(`browser errors:\n${errors.join("\n")}`);
   console.log("pages e2e passed");

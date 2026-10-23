@@ -184,7 +184,19 @@ created keep their ids, so a retry skips them.
   email/username/url → one LOGIN; a provider-shaped key (`sk_live_…`, `ghp_…`, AWS ids…)
   → API_KEY; a PEM private key → SSH_KEY; anything else secret-shaped the person chooses
   → SECURE_NOTE. The secret is removed from the page text and a chip takes its place.
+* Labels may carry a service ("Gmail password", which names the item and separates
+  accounts) or a role ("Admin password"); several labels may share a line or a `<br>`
+  block; a label alone on a line takes a one-word value from the next; two-column
+  tables read top to bottom. Placeholders (N/A, -, TBD) and prose after a label are
+  not taken.
+* The same secret for the same account at the same place, found more than once, is
+  one item; every page it was on links to it, and its notes list those pages.
 * Every decision is visible and changeable in the preview; nothing is silently dropped.
+  The preview shows names, types, sites, accounts and which fields were found, never
+  a secret.
+* Everything the import creates is archived by default (pages carry an encrypted
+  `imported` marker, items the `notion-import` tag): the workspace arrives out of the
+  way and is brought back by unarchiving its top page.
 
 ### Scale
 
@@ -222,6 +234,13 @@ Notion importer as designed above, with the preview step. Tests: API integration
 (`pages.test.ts`), core (`blob.test.ts`), web unit tests for the tree and every importer
 stage, and browser tests (`tests/e2e/pages.mjs`, plus pages in `backup.mjs` and
 `rotation.mjs`).
+
+Added after phase 1: archiving pages and vault items (singly, in bulk, with one "Show
+archived" switch; imports arrive archived), and importer fixes found by running it on
+a real 2,500-page export with `export-stats.test.ts`, which prints aggregate counts
+only: title-only sub-page folders (the tree had come out flat), looser row matching
+(400 row pages would have been imported twice), and many more credential shapes
+(47 → 85 found; password-shaped text left after redaction 62 → 6).
 
 Left for phase 2 (as planned there): editing database properties and views, version
 history UI, content search, block drag handle, covers, files in backups, and lowering
