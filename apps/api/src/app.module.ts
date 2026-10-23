@@ -18,6 +18,7 @@ import { MailModule } from "./mail/mail.module";
 import { NotesModule } from "./notes/notes.module";
 import { OperatorModule } from "./operator/operator.module";
 import { OrganizeModule } from "./organize/organize.module";
+import { PagesModule } from "./pages/pages.module";
 import { PeopleSharingModule } from "./people-sharing/people-sharing.module";
 import { SecurityModule } from "./security/security.module";
 import { SharesModule } from "./shares/shares.module";
@@ -59,6 +60,7 @@ function throttlerStorage() {
     AccountModule,
     OrganizeModule,
     NotesModule,
+    PagesModule,
     SecurityModule,
     AiModule,
     ImportsModule,

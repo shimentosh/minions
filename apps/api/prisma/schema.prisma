@@ -236,6 +236,7 @@ model Vault {
   collections Collection[]
   tags        Tag[]
   notes       Note[]
+  pages       Page[]
 
   @@index([userId])
   @@map("vaults")
@@ -497,6 +498,82 @@ model NoteTag {
   @@id([noteId, tagId])
   @@index([tagId])
   @@map("note_tags")
+}
+
+// ─── Pages ───────────────────────────────────────────────────────────────────
+//
+// Notion-style pages (docs/NOTION_ALTERNATIVE_PLAN.md). Each page has its own
+// key, wrapped by the vault key; title, icon, properties, content and files
+// are ciphertext under it. The server sees only the tree's shape, order,
+// kind, favorite flag, times and sizes.
+
+model Page {
+  /// Client-generated so ciphertext AAD can bind to it before the first save.
+  id           String    @id @db.Uuid
+  vaultId      String    @db.Uuid
+  /// Null: a top-level page. Always in the same vault.
+  parentId     String?   @db.Uuid
+  /// Fractional-index key ordering siblings.
+  position     String
+  /// "page" or "database" (a database's rows are its child pages).
+  kind         String    @default("page")
+  /// The page key, wrapped by the vault key (pageAad.key).
+  protectedKey String
+  /// {title, icon, props} JSON, encrypted with the page key.
+  metaEnc      String
+  /// The document (or database schema) JSON, encrypted with the page key.
+  contentEnc   String?
+  /// Vault key generation protectedKey is wrapped under.
+  keyGen       Int       @default(1)
+  favorite     Boolean   @default(false)
+  revision     Int       @default(1)
+  /// Set on a page and all its descendants at once, to the same instant, so restore brings back exactly that group.
+  deletedAt    DateTime?
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  vault    Vault         @relation(fields: [vaultId], references: [id], onDelete: Cascade)
+  parent   Page?         @relation("PageTree", fields: [parentId], references: [id], onDelete: Cascade)
+  children Page[]        @relation("PageTree")
+  versions PageVersion[]
+  files    PageFile[]
+
+  @@index([vaultId, deletedAt])
+  @@index([parentId])
+  @@map("pages")
+}
+
+model PageVersion {
+  id         String   @id @default(uuid()) @db.Uuid
+  pageId     String   @db.Uuid
+  revision   Int
+  metaEnc    String
+  contentEnc String?
+  createdAt  DateTime @default(now())
+
+  page Page @relation(fields: [pageId], references: [id], onDelete: Cascade)
+
+  @@unique([pageId, revision])
+  @@map("page_versions")
+}
+
+/// An image or attachment in a page: ciphertext only (encryptBlob under the page key).
+model PageFile {
+  /// Client-generated: the AAD binds the bytes to page and file.
+  id        String   @id @db.Uuid
+  pageId    String   @db.Uuid
+  vaultId   String   @db.Uuid
+  /// {name, type} JSON, encrypted with the page key.
+  metaEnc   String
+  size      Int
+  data      Bytes
+  createdAt DateTime @default(now())
+
+  page Page @relation(fields: [pageId], references: [id], onDelete: Cascade)
+
+  @@index([pageId])
+  @@index([vaultId])
+  @@map("page_files")
 }
 
 // ─── Activity & security ─────────────────────────────────────────────────────

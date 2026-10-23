@@ -3,6 +3,7 @@ import type { NestExpressApplication } from "@nestjs/platform-express";
 import cookieParser from "cookie-parser";
 import helmet from "helmet";
 import { loadConfig } from "./config";
+import { PAGE_FILE_MAX_BYTES } from "./pages/limits";
 
 /** Shared by main.ts and the integration tests, so tests run the real stack. */
 export function configureApp(app: INestApplication) {
@@ -11,6 +12,8 @@ export function configureApp(app: INestApplication) {
   express.set("trust proxy", cfg.trustProxy);
   express.disable("x-powered-by");
   express.useBodyParser("json", { limit: "3mb" });
+  // Encrypted page files (PUT /pages/:id/files/:fileId) arrive as raw ciphertext.
+  express.useBodyParser("raw", { type: "application/octet-stream", limit: PAGE_FILE_MAX_BYTES });
   app.use(
     helmet({
       contentSecurityPolicy: { directives: { defaultSrc: ["'none'"], frameAncestors: ["'none'"] } },
@@ -24,7 +27,7 @@ export function configureApp(app: INestApplication) {
   });
   app.enableCors({
     credentials: true,
-    allowedHeaders: ["content-type", "authorization", "x-minions-client"],
+    allowedHeaders: ["content-type", "authorization", "x-minions-client", "x-minions-file-meta"],
     methods: ["GET", "POST", "PUT", "PATCH", "DELETE"],
     origin: (origin: string | undefined, cb: (err: Error | null, allow?: boolean) => void) => {
       if (!origin) return cb(null, true);

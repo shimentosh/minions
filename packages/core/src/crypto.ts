@@ -187,6 +187,77 @@ export const aad = {
   version: (itemId: string, fieldKey: string) => `item:${itemId}:field:${fieldKey}`,
 };
 
+/**
+ * Pages (docs/NOTION_ALTERNATIVE_PLAN.md §2). Each page has its own key,
+ * wrapped by the key of the vault it lives in; everything else about the page
+ * is encrypted under that page key and bound to the page (and file) id.
+ */
+export const pageAad = {
+  /** The page key, wrapped by the vault key. */
+  key: (vaultId: string, pageId: string) => `vault:${vaultId}:page:${pageId}:key`,
+  /** Title, icon and database row properties. */
+  meta: (pageId: string) => `page:${pageId}:meta`,
+  /** The editor document (or a database's schema). */
+  content: (pageId: string) => `page:${pageId}:content`,
+  file: (pageId: string, fileId: string) => `page:${pageId}:file:${fileId}`,
+  fileMeta: (pageId: string, fileId: string) => `page:${pageId}:file:${fileId}:meta`,
+};
+
+const BLOB_VERSION = 1;
+
+/**
+ * Binary ciphertext for files: version byte ‖ 12-byte IV ‖ AES-GCM output.
+ * Raw bytes rather than a base64 envelope, so uploads carry no 33% overhead.
+ */
+export async function encryptBlob(
+  key: Uint8Array<ArrayBuffer>,
+  plaintext: Uint8Array<ArrayBuffer>,
+  context: string,
+): Promise<Uint8Array<ArrayBuffer>> {
+  const iv = randomBytes(IV_BYTES);
+  const ct = new Uint8Array(
+    await subtle().encrypt(
+      { name: "AES-GCM", iv, additionalData: utf8(context), tagLength: 128 },
+      await aesKey(key, ["encrypt"]),
+      plaintext,
+    ),
+  );
+  const out = new Uint8Array(1 + IV_BYTES + ct.length);
+  out[0] = BLOB_VERSION;
+  out.set(iv, 1);
+  out.set(ct, 1 + IV_BYTES);
+  return out;
+}
+
+/** Whether bytes have the shape of an encrypted blob (the server's plaintext check). */
+export function isEncryptedBlob(bytes: Uint8Array): boolean {
+  return bytes.length >= 1 + IV_BYTES + 16 && bytes[0] === BLOB_VERSION;
+}
+
+export async function decryptBlob(
+  key: Uint8Array<ArrayBuffer>,
+  blob: Uint8Array<ArrayBuffer>,
+  context: string,
+): Promise<Uint8Array<ArrayBuffer>> {
+  if (!isEncryptedBlob(blob)) throw new DecryptionError();
+  try {
+    return new Uint8Array(
+      await subtle().decrypt(
+        {
+          name: "AES-GCM",
+          iv: blob.slice(1, 1 + IV_BYTES),
+          additionalData: utf8(context),
+          tagLength: 128,
+        },
+        await aesKey(key, ["decrypt"]),
+        blob.slice(1 + IV_BYTES),
+      ),
+    );
+  } catch {
+    throw new DecryptionError();
+  }
+}
+
 export async function wrapKey(
   wrappingKey: Uint8Array<ArrayBuffer>,
   key: Uint8Array<ArrayBuffer>,
