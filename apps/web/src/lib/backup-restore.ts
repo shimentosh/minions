@@ -3,14 +3,18 @@ import {
   DecryptionError,
   decryptString,
   deriveMasterKeys,
+  encryptString,
   type FieldKind,
   type KdfParams,
   keyAad,
+  pageAad,
   type UpsertItemRequest,
   unwrapKey,
   wipe,
+  wrapKey,
 } from "@minions/core";
-import { get, patch, post } from "./api";
+import { ApiError, get, patch, post } from "./api";
+import { requireVaultKey, useSession } from "./session";
 import { type CustomFieldInput, encryptDraft, encryptNote } from "./vault-crypto";
 
 interface BackupField {
@@ -61,6 +65,19 @@ export interface MinionsBackup {
     deletedAt: string | null;
     tags: string[];
   }[];
+  /** Backups made before pages existed have none. */
+  pages?: {
+    id: string;
+    parentId: string | null;
+    position: string;
+    kind: "page" | "database";
+    /** The page key, wrapped by the backup's vault key. Meta and content are under it. */
+    protectedKey: string;
+    metaEnc: string;
+    contentEnc: string | null;
+    favorite: boolean;
+    deletedAt: string | null;
+  }[];
   relations: { fromItemId: string; toItemId: string; kind: string }[];
 }
 
@@ -69,6 +86,7 @@ export interface RestoreSummary {
   skippedItems: number;
   restoredNotes: number;
   skippedNotes: number;
+  restoredPages: number;
   failed: number;
 }
 
@@ -170,13 +188,15 @@ export async function restoreBackup(
       for (const id of res.noteIds) existingNotes.add(id);
     }
 
-    const total = items.length + notes.length;
+    const pages = (backup.pages ?? []).filter((p) => opts.includeTrash || !p.deletedAt);
+    const total = items.length + notes.length + pages.length;
     let done = 0;
     const summary: RestoreSummary = {
       restoredItems: 0,
       skippedItems: 0,
       restoredNotes: 0,
       skippedNotes: 0,
+      restoredPages: 0,
       failed: 0,
     };
     const idMap = new Map<string, string>();
@@ -310,7 +330,82 @@ export async function restoreBackup(
       opts.onProgress(done, total);
     }
 
-    // 6. Relationships between restored items.
+    // 6. Pages, parents first. Their content stays as it is, under each page's
+    // own key: only that key moves from the backup's vault key to this one.
+    const vaultId = useSession.getState().me?.vaultId;
+    if (!vaultId) throw new Error("Vault is locked");
+    const inBackup = new Set(pages.map((p) => p.id));
+    const ordered: typeof pages = [];
+    const kids = new Map<string | null, typeof pages>();
+    for (const p of pages) {
+      const parent = p.parentId && inBackup.has(p.parentId) ? p.parentId : null;
+      kids.set(parent, [...(kids.get(parent) ?? []), p]);
+    }
+    const walk = (parent: string | null) => {
+      for (const p of kids.get(parent) ?? []) {
+        ordered.push(p);
+        walk(p.id);
+      }
+    };
+    walk(null);
+    // Old page id → id here. A different id only when the old one is taken by
+    // another account on this server: the AAD names the page, so its meta and
+    // content are then re-encrypted for the new id.
+    const pageIds = new Map<string, string>();
+    const build = async (p: (typeof pages)[number], fresh: boolean) => {
+      const pageKey = await unwrapKey(
+        backupKey,
+        p.protectedKey,
+        pageAad.key(backup.keys.vaultId, p.id),
+      );
+      try {
+        const id = fresh ? crypto.randomUUID() : p.id;
+        const move = async (env: string | null, ctx: (x: string) => string) =>
+          env && fresh
+            ? encryptString(pageKey, await decryptString(pageKey, env, ctx(p.id)), ctx(id))
+            : env;
+        pageIds.set(p.id, id);
+        return {
+          id,
+          parentId:
+            p.parentId && inBackup.has(p.parentId) ? (pageIds.get(p.parentId) ?? null) : null,
+          position: p.position,
+          kind: p.kind,
+          protectedKey: await wrapKey(requireVaultKey(), pageKey, pageAad.key(vaultId, id)),
+          metaEnc: (await move(p.metaEnc, pageAad.meta))!,
+          contentEnc: await move(p.contentEnc, pageAad.content),
+          favorite: p.favorite,
+        };
+      } finally {
+        wipe(pageKey);
+      }
+    };
+    let freshIds = false;
+    for (let i = 0; i < ordered.length; i += 100) {
+      const slice = ordered.slice(i, i + 100);
+      const send = async () => {
+        const batch = [];
+        for (const p of slice) batch.push(await build(p, freshIds));
+        return post<{ created: number }>("/pages/batch", { pages: batch });
+      };
+      try {
+        let res: { created: number };
+        try {
+          res = await send();
+        } catch (e) {
+          if (!(e instanceof ApiError && e.status === 409) || freshIds) throw e;
+          freshIds = true;
+          res = await send();
+        }
+        summary.restoredPages += res.created;
+      } catch {
+        summary.failed += slice.length;
+      }
+      done += slice.length;
+      opts.onProgress(done, total);
+    }
+
+    // 7. Relationships between restored items.
     for (const r of backup.relations) {
       const from = idMap.get(r.fromItemId);
       const to = idMap.get(r.toItemId);

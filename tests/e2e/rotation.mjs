@@ -1,5 +1,5 @@
-// Vault-key rotation through the real web client: create a login and a note,
-// change the vault key in Settings, then lock, unlock and read both back.
+// Vault-key rotation through the real web client: create a login, a note and
+// a page, change the vault key in Settings, then lock, unlock and read them back.
 //   pnpm dev   (API on :4600, web on :5180)
 //   node tests/e2e/rotation.mjs
 import { chromium } from "playwright";
@@ -56,8 +56,19 @@ try {
   await page.keyboard.type("note body survives rotation");
   await page.getByText(/Saved/).waitFor({ timeout: 10_000 });
 
+  step("create a page");
+  await nav("/pages");
+  await page.getByRole("button", { name: "New page" }).first().click();
+  await page.waitForURL(/\/pages\/[0-9a-f-]{36}/);
+  const pageUrl = new URL(page.url());
+  await page.getByPlaceholder("Untitled").fill("Rotated page");
+  await page.locator(".page-prose .ProseMirror").click();
+  await page.keyboard.type("page body survives rotation");
+  await page.getByText(/Saved/).first().waitFor({ timeout: 10_000 });
+  await page.waitForTimeout(1500);
+
   step("change the vault key");
-  await nav("/settings");
+  await nav("/settings?tab=security");
   await page.locator("#vk-password").fill(password);
   await page.getByRole("button", { name: "Change vault key" }).click();
   await page.getByText("Vault key changed").first().waitFor({ timeout: 60_000 });
@@ -74,6 +85,10 @@ try {
   await page.getByText("rotate-me-Secret-77", { exact: true }).waitFor();
   await nav(`${noteUrl.pathname}${noteUrl.search}`);
   await page.getByText("note body survives rotation").waitFor({ timeout: 10_000 });
+  await nav(pageUrl.pathname);
+  await page.getByText("page body survives rotation").waitFor({ timeout: 10_000 });
+  if ((await page.getByPlaceholder("Untitled").inputValue()) !== "Rotated page")
+    throw new Error("page title did not survive rotation");
 } catch (e) {
   errors.push(`assertion: ${e.message}`);
 } finally {

@@ -508,8 +508,9 @@ function RestoreBackup() {
       )}
       {result && (
         <p className="rounded-lg bg-emerald-500/8 px-3 py-2 text-emerald-700 text-sm dark:text-emerald-400">
-          Restored {result.restoredItems} items and {result.restoredNotes} notes. Skipped{" "}
-          {result.skippedItems + result.skippedNotes} already in your vault
+          Restored {result.restoredItems} items, {result.restoredNotes} notes and{" "}
+          {result.restoredPages} pages. Skipped {result.skippedItems + result.skippedNotes} already
+          in your vault
           {result.failed ? `; ${result.failed} could not be restored` : ""}.
         </p>
       )}

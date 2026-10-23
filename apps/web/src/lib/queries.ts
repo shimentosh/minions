@@ -184,6 +184,8 @@ export function useInvalidateVault() {
       qc.invalidateQueries({ queryKey: ["ws"] }),
       qc.invalidateQueries({ queryKey: ["shared"] }),
       qc.invalidateQueries({ queryKey: ["people"] }),
+      // Restores and key changes touch pages too.
+      qc.invalidateQueries({ queryKey: ["pages"] }),
     ]);
 }
 
