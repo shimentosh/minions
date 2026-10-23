@@ -272,7 +272,7 @@ function ForgotPassword({ initialEmail, onBack }: { initialEmail: string; onBack
     return (
       <AuthLayout
         title="Forgot your master password?"
-        subtitle="We'll email you a link to set a new one. Your vault stays exactly as it is."
+        subtitle="We'll email you a link to set a new one. You can keep your vault, or start fresh."
       >
         <form
           className="space-y-4"
@@ -401,11 +401,21 @@ function NewPasswordForm({
   twoFactorRequired,
   onSubmit,
   footer,
+  children,
+  ready = true,
+  submitLabel = "Set new master password",
+  busyLabel = "Opening your vault on this device…",
 }: {
   subtitle: string;
   twoFactorRequired: boolean;
   onSubmit: (password: string, code: string | undefined) => Promise<void>;
   footer: ReactNode;
+  /** Shown above the password fields. */
+  children?: ReactNode;
+  /** False holds the submit button back, on top of the password checks. */
+  ready?: boolean;
+  submitLabel?: string;
+  busyLabel?: string;
 }) {
   const [password, setPassword] = useState("");
   const [confirm, setConfirm] = useState("");
@@ -418,6 +428,7 @@ function NewPasswordForm({
     password.length >= 12 &&
     strength.score >= 3 &&
     password === confirm &&
+    ready &&
     (!twoFactorRequired || code.trim().length >= 6);
 
   return (
@@ -436,6 +447,7 @@ function NewPasswordForm({
           }
         }}
       >
+        {children}
         <div className="space-y-1.5">
           <Label htmlFor="new-password">New master password</Label>
           <PasswordInput
@@ -477,13 +489,9 @@ function NewPasswordForm({
         )}
         <FormError error={error} />
         <Button type="submit" className="w-full" loading={busy} disabled={!canSave}>
-          Set new master password
+          {submitLabel}
         </Button>
-        {busy && (
-          <p className="text-center text-muted-foreground text-xs">
-            Opening your vault on this device…
-          </p>
-        )}
+        {busy && <p className="text-center text-muted-foreground text-xs">{busyLabel}</p>}
         {footer}
       </form>
     </AuthLayout>
@@ -508,7 +516,52 @@ function takeLinkToken(): string {
 type ResetLink =
   | { kind: "checking" }
   | { kind: "invalid"; error: string }
-  | { kind: "ready"; token: string; email: string; twoFactorRequired: boolean };
+  | {
+      kind: "ready";
+      token: string;
+      email: string;
+      twoFactorRequired: boolean;
+      canKeepVault: boolean;
+    };
+
+/** One choice on the reset page, styled as a radio card. */
+function ResetChoice({
+  selected,
+  onSelect,
+  title,
+  children,
+}: {
+  selected: boolean;
+  onSelect: () => void;
+  title: string;
+  children: ReactNode;
+}) {
+  return (
+    <button
+      type="button"
+      role="radio"
+      aria-checked={selected}
+      onClick={onSelect}
+      className={cn(
+        "flex w-full gap-3 rounded-lg border px-3 py-2.5 text-start transition-colors",
+        selected ? "border-primary bg-primary/5" : "hover:bg-muted/50",
+      )}
+    >
+      <span
+        className={cn(
+          "mt-0.5 flex size-4 shrink-0 items-center justify-center rounded-full border",
+          selected && "border-primary",
+        )}
+      >
+        {selected && <span className="size-2 rounded-full bg-primary" />}
+      </span>
+      <span className="space-y-0.5">
+        <span className="block font-medium text-sm">{title}</span>
+        <span className="block text-muted-foreground text-xs">{children}</span>
+      </span>
+    </button>
+  );
+}
 
 /**
  * Opened from the reset email. As with email verification, the token is in
@@ -517,7 +570,10 @@ type ResetLink =
  */
 export function ResetPasswordPage({ onDone }: { onDone: () => void }) {
   const resetPassword = useSession((s) => s.resetPassword);
+  const startOver = useSession((s) => s.startOver);
   const [link, setLink] = useState<ResetLink>({ kind: "checking" });
+  const [keep, setKeep] = useState(true);
+  const [understood, setUnderstood] = useState(false);
 
   useEffect(() => {
     const token = takeLinkToken();
@@ -525,8 +581,20 @@ export function ResetPasswordPage({ onDone }: { onDone: () => void }) {
       setLink({ kind: "invalid", error: "This link is incomplete. Open it again from the email." });
       return;
     }
-    post<{ email: string; twoFactorRequired: boolean }>("/auth/reset/check", { token }).then(
-      (r) => setLink({ kind: "ready", token, ...r }),
+    post<{ email: string; twoFactorRequired: boolean; canKeepVault: boolean }>(
+      "/auth/reset/check",
+      { token },
+    ).then(
+      (r) => {
+        setLink({
+          kind: "ready",
+          token,
+          email: r.email,
+          twoFactorRequired: r.twoFactorRequired,
+          canKeepVault: r.canKeepVault,
+        });
+        setKeep(r.canKeepVault);
+      },
       (e) => setLink({ kind: "invalid", error: errorMessage(e) }),
     );
   }, []);
@@ -561,15 +629,46 @@ export function ResetPasswordPage({ onDone }: { onDone: () => void }) {
 
   return (
     <NewPasswordForm
-      subtitle={`For ${link.email}. Your vault, workspaces and shares stay as they are. Other devices are signed out.`}
+      subtitle={`For ${link.email}. Other devices are signed out.`}
       twoFactorRequired={link.twoFactorRequired}
+      ready={keep || understood}
+      submitLabel={keep ? "Set new master password" : "Start fresh"}
+      busyLabel={keep ? "Opening your vault on this device…" : "Setting up your new vault…"}
       onSubmit={async (password, code) => {
-        await resetPassword({ token: link.token, password, code });
+        if (keep) await resetPassword({ token: link.token, password, code });
+        else await startOver({ token: link.token, password, code });
         // No reload: the vault key lives only in this page's memory.
         onDone();
       }}
       footer={toSignIn}
-    />
+    >
+      <div role="radiogroup" aria-label="What happens to your vault" className="space-y-2">
+        {link.canKeepVault ? (
+          <ResetChoice selected={keep} onSelect={() => setKeep(true)} title="Keep my vault">
+            Items, workspaces and shares stay as they are. Only the master password changes.
+          </ResetChoice>
+        ) : (
+          <p className="rounded-lg border px-3 py-2.5 text-muted-foreground text-xs">
+            Email reset was off for this account, so this link can't keep your vault. To keep it,
+            use a backup code from the sign-in page instead.
+          </p>
+        )}
+        <ResetChoice selected={!keep} onSelect={() => setKeep(false)} title="Start fresh">
+          A new, empty vault. Your old vault is deleted and you leave your workspaces.
+        </ResetChoice>
+      </div>
+      {!keep && (
+        <label className="flex items-start gap-2 text-sm">
+          <input
+            type="checkbox"
+            className="mt-0.5 accent-primary"
+            checked={understood}
+            onChange={(e) => setUnderstood(e.target.checked)}
+          />
+          <span>I understand my old vault will be deleted and can't be recovered.</span>
+        </label>
+      )}
+    </NewPasswordForm>
   );
 }
 

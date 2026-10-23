@@ -30,6 +30,7 @@ import {
   ResetCompleteDto,
   ResetOpenDto,
   ResetRequestDto,
+  ResetStartOverDto,
   ResetTokenDto,
   TwoFactorVerifyDto,
 } from "./auth.dto";
@@ -147,6 +148,19 @@ export class AuthController {
     @Res({ passthrough: true }) res: Response,
   ) {
     return send(res, await this.auth.completeReset(dto, client));
+  }
+
+  /** The other choice on the reset page: a new master password and an empty vault. */
+  @Public()
+  @Throttle({ default: { limit: 5, ttl: 60_000 } })
+  @Post("reset/start-over")
+  @HttpCode(200)
+  async startOver(
+    @Body() dto: ResetStartOverDto,
+    @Client() client: ClientInfo,
+    @Res({ passthrough: true }) res: Response,
+  ) {
+    return send(res, await this.auth.startOver(dto, client));
   }
 
   @AllowPending2fa()
