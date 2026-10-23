@@ -24,6 +24,7 @@ import {
   Post,
   Put,
   Query,
+  Res,
   StreamableFile,
   UseGuards,
 } from "@nestjs/common";
@@ -42,6 +43,7 @@ import {
   Min,
   ValidateNested,
 } from "class-validator";
+import type { Response } from "express";
 import { ActivityService } from "../activity/activity.service";
 import { Auth, type AuthContext } from "../common/auth-context";
 import { VaultUnlockedGuard } from "../common/guards";
@@ -504,8 +506,11 @@ export class PagesController {
     @Auth() a: AuthContext,
     @Id() id: string,
     @Id("fileId") fileId: string,
+    @Res({ passthrough: true }) res: Response,
   ) {
     const file = await this.pages.getFile(a, id, fileId);
+    // The encrypted {name, type}; ciphertext, like the body.
+    res.setHeader("x-minions-file-meta", file.metaEnc);
     return new StreamableFile(Buffer.from(file.data), { type: "application/octet-stream" });
   }
 }

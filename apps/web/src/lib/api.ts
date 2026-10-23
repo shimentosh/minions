@@ -85,6 +85,13 @@ export async function api<T = unknown>(
   return data as T;
 }
 
+/** Headers for a hand-made fetch (binary bodies): the client header and, on desktop, the token. */
+export function bearerHeaders(): Record<string, string> {
+  const headers: Record<string, string> = { "x-minions-client": clientKind };
+  if (bearerToken) headers.authorization = `Bearer ${bearerToken}`;
+  return headers;
+}
+
 export const get = <T>(
   path: string,
   query?: Record<string, string | number | boolean | undefined | null>,

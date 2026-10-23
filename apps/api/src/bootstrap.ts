@@ -28,6 +28,7 @@ export function configureApp(app: INestApplication) {
   app.enableCors({
     credentials: true,
     allowedHeaders: ["content-type", "authorization", "x-minions-client", "x-minions-file-meta"],
+    exposedHeaders: ["x-minions-file-meta"],
     methods: ["GET", "POST", "PUT", "PATCH", "DELETE"],
     origin: (origin: string | undefined, cb: (err: Error | null, allow?: boolean) => void) => {
       if (!origin) return cb(null, true);
