@@ -604,8 +604,11 @@ export function PagesHome() {
   const showArchived = useShowArchived((s) => s.show);
   const setShowArchived = useShowArchived((s) => s.setShow);
   const [selected, setSelected] = useState<Set<string>>(new Set());
-  // biome-ignore lint/correctness/useExhaustiveDependencies: a new view starts with nothing ticked
-  useEffect(() => setSelected(new Set()), [search.view]);
+  // biome-ignore lint/correctness/useExhaustiveDependencies: a new view starts with nothing ticked or searched
+  useEffect(() => {
+    setSelected(new Set());
+    setQ("");
+  }, [search.view]);
   const onSelect = (id: string, on: boolean) =>
     setSelected((s) => {
       const next = new Set(s);

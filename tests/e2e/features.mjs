@@ -42,7 +42,7 @@ const dialog = () => page.getByRole("dialog");
 const pasteInto = async (text) => {
   await page.evaluate((t) => navigator.clipboard.writeText(t), text);
   await dialog().getByLabel("Paste anything").click();
-  await page.keyboard.press("Control+V");
+  await page.keyboard.press("ControlOrMeta+V");
   await page.waitForTimeout(200);
 };
 
@@ -177,7 +177,7 @@ try {
       automaticPresenceSimulation: true,
     },
   });
-  await nav("/settings");
+  await nav("/settings?tab=security");
   await page.getByRole("button", { name: "Add a passkey" }).click();
   await page.getByPlaceholder("Master password").fill(password);
   await page.getByRole("button", { name: "Continue" }).click();
@@ -192,7 +192,7 @@ try {
   await page.getByRole("button", { name: "Use a passkey" }).waitFor({ timeout: 30_000 });
   await shot("f06-passkey-2fa");
   await page.getByRole("button", { name: "Use a passkey" }).click();
-  await page.getByText("Devices & sessions").first().waitFor({ timeout: 30_000 });
+  await page.getByRole("button", { name: "Account menu" }).waitFor({ timeout: 30_000 });
   check(true, "passkey: signed in with the passkey as second factor");
 } catch (e) {
   await shot("zz-features-failure").catch(() => undefined);

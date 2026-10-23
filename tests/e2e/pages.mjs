@@ -186,7 +186,8 @@ try {
 
   step("unarchive one item, archive it again in bulk");
   await nav("/vault?archived=true");
-  await page.getByRole("button", { name: "Actions for GitHub" }).click();
+  // Exact: the draggable row is a button too, and its name contains the menu's.
+  await page.getByRole("button", { name: "Actions for GitHub", exact: true }).click();
   await page.getByRole("menuitem", { name: "Unarchive" }).click();
   await nav("/vault");
   await page.getByRole("checkbox", { name: "Select GitHub" }).click();

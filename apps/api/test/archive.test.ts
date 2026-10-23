@@ -199,6 +199,11 @@ describe("archived vault items", () => {
     const backup = (await alice.agent.get("/vault/export").expect(200)).body;
     expect(backup.items[0].archivedAt).toBeTruthy();
     const dash = (await alice.agent.get("/dashboard").expect(200)).body;
-    expect(JSON.stringify(dash)).not.toContain(it.id);
+    // The activity feed still records that it was created; the item lists leave it out.
+    const listed = [...dash.favorites, ...dash.recent, ...dash.frequent].map(
+      (i: { id: string }) => i.id,
+    );
+    expect(listed).not.toContain(it.id);
+    expect(dash.sinceLastVisit.created).toBe(0);
   });
 });

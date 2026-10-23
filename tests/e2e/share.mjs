@@ -37,7 +37,7 @@ try {
     "Website: staging.example.com\nUser: team@example.com\nPass: Sh4red-Staging-Pass!\n2FA: JBSWY3DPEHPK3PXP",
   );
   await d.getByLabel("Paste anything").click();
-  await owner.keyboard.press("Control+V");
+  await owner.keyboard.press("ControlOrMeta+V");
   await d.locator("#item-name").fill("Staging admin");
   await d.getByRole("button", { name: "Save", exact: true }).click();
   await owner.waitForURL(/item=/);
@@ -45,6 +45,8 @@ try {
   // Share it: one view, with live 2FA.
   await owner.getByRole("button", { name: "Share" }).click();
   const sd = owner.getByRole("dialog");
+  // The dialog opens on sharing with people; links are the other tab.
+  await sd.getByRole("tab", { name: "Link" }).click();
   await sd.getByText("Include live 2FA codes").click();
   await owner.screenshot({ path: `${OUT}/s01-share-dialog.png` });
   await sd.getByRole("button", { name: "Create link" }).click();
@@ -112,7 +114,7 @@ try {
 } catch (e) {
   failures.push(e.message.split("\n")[0]);
   console.log(`✗ ${e.message.split("\n")[0]}`);
-} finally {
+  console.log(e.stack); // TEMP-DEBUG} finally {
   await browser.close();
 }
 if (failures.length) {
