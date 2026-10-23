@@ -32,6 +32,7 @@ import { Throttle } from "@nestjs/throttler";
 import { Type } from "class-transformer";
 import {
   ArrayMaxSize,
+  ArrayMinSize,
   IsArray,
   IsBoolean,
   IsIn,
@@ -74,6 +75,8 @@ class CreatePageDto {
   @IsString() @MaxLength(65_536) metaEnc!: string;
   @IsOptional() @IsString() @MaxLength(PAGE_CONTENT_MAX) contentEnc?: string | null;
   @IsOptional() @IsBoolean() favorite?: boolean;
+  /** Imports create their pages archived. */
+  @IsOptional() @IsBoolean() archived?: boolean;
 }
 
 class BatchCreateDto {
@@ -97,6 +100,11 @@ class MovePageDto {
   @IsOptional() @IsBoolean() favorite?: boolean;
 }
 
+class ArchivePagesDto {
+  @IsArray() @ArrayMinSize(1) @ArrayMaxSize(500) @IsUUID(4, { each: true }) ids!: string[];
+  @IsBoolean() archived!: boolean;
+}
+
 class TreeQuery {
   @IsOptional() @IsIn(["active", "trash"]) view?: "active" | "trash";
 }
@@ -109,6 +117,7 @@ const NODE_SELECT = {
   protectedKey: true,
   metaEnc: true,
   favorite: true,
+  archivedAt: true,
   revision: true,
   createdAt: true,
   updatedAt: true,
@@ -126,6 +135,7 @@ function node(p: NodeRow): PageNode {
     protectedKey: p.protectedKey,
     metaEnc: p.metaEnc,
     favorite: p.favorite,
+    archivedAt: p.archivedAt?.toISOString() ?? null,
     revision: p.revision,
     createdAt: p.createdAt.toISOString(),
     updatedAt: p.updatedAt.toISOString(),
@@ -235,6 +245,7 @@ export class PagesService {
       metaEnc: dto.metaEnc,
       contentEnc: dto.contentEnc ?? null,
       favorite: dto.favorite ?? false,
+      archivedAt: dto.archived ? new Date() : null,
     };
   }
 
@@ -341,6 +352,58 @@ export class PagesService {
       select: NODE_SELECT,
     });
     return node(updated);
+  }
+
+  /**
+   * Archives pages with everything under them, or brings them back. Bringing
+   * a page back also brings back the pages above it, so it is reachable in the
+   * tree again. Only live pages (not in the trash) change.
+   */
+  async archive(auth: AuthContext, dto: ArchivePagesDto) {
+    const ids = [...new Set(dto.ids)];
+    const owned = await this.prisma.page.count({
+      where: { id: { in: ids }, vaultId: auth.vaultId, deletedAt: null },
+    });
+    if (owned !== ids.length) throw new NotFoundException();
+    const vaultId = auth.vaultId;
+    const updated = await this.prisma.$transaction(async (tx) => {
+      const down = await tx.$queryRaw<{ id: string }[]>`
+        WITH RECURSIVE tree AS (
+          SELECT id FROM pages
+          WHERE id = ANY(${ids}::uuid[]) AND "vaultId" = ${vaultId}::uuid AND "deletedAt" IS NULL
+          UNION
+          SELECT p.id FROM pages p JOIN tree t ON p."parentId" = t.id
+          WHERE p."vaultId" = ${vaultId}::uuid AND p."deletedAt" IS NULL
+        )
+        SELECT id FROM tree`;
+      const targets = new Set(down.map((r) => r.id));
+      if (!dto.archived) {
+        const up = await tx.$queryRaw<{ id: string }[]>`
+          WITH RECURSIVE up AS (
+            SELECT id, "parentId" FROM pages
+            WHERE id = ANY(${ids}::uuid[]) AND "vaultId" = ${vaultId}::uuid
+            UNION
+            SELECT p.id, p."parentId" FROM pages p JOIN up u ON p.id = u."parentId"
+            WHERE p."vaultId" = ${vaultId}::uuid AND p."deletedAt" IS NULL
+          )
+          SELECT id FROM up`;
+        for (const r of up) targets.add(r.id);
+      }
+      const r = await tx.page.updateMany({
+        where: {
+          id: { in: [...targets] },
+          vaultId,
+          // Pages archived earlier keep their date.
+          archivedAt: dto.archived ? null : { not: null },
+        },
+        data: { archivedAt: dto.archived ? new Date() : null },
+      });
+      return r.count;
+    });
+    await this.activity.log(auth, dto.archived ? "pages.archived" : "pages.unarchived", {
+      metadata: { count: updated },
+    });
+    return { updated };
   }
 
   /** Moves a page and everything under it to the trash, as one group. */
@@ -479,6 +542,11 @@ export class PagesController {
   @HttpCode(200)
   createMany(@Auth() a: AuthContext, @Body() dto: BatchCreateDto) {
     return this.pages.createMany(a, dto);
+  }
+  @Post("archive")
+  @HttpCode(200)
+  archive(@Auth() a: AuthContext, @Body() dto: ArchivePagesDto) {
+    return this.pages.archive(a, dto);
   }
   @Get(":id") get(@Auth() a: AuthContext, @Id() id: string) {
     return this.pages.get(a, id);

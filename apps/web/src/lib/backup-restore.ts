@@ -51,6 +51,8 @@ export interface MinionsBackup {
     /** Items shared with people: their own key, wrapped by the backup's vault key. */
     protectedItemKey?: string | null;
     fields: BackupField[];
+    /** Backups made before archiving existed have none. */
+    archivedAt?: string | null;
     deletedAt: string | null;
   }[];
   notes: {
@@ -76,6 +78,7 @@ export interface MinionsBackup {
     metaEnc: string;
     contentEnc: string | null;
     favorite: boolean;
+    archivedAt?: string | null;
     deletedAt: string | null;
   }[];
   relations: { fromItemId: string; toItemId: string; kind: string }[];
@@ -228,7 +231,7 @@ export async function restoreBackup(
           });
       }
       if (fieldKey !== backupKey) wipe(fieldKey);
-      return encryptDraft({
+      const request = await encryptDraft({
         id,
         type: item.type,
         name: item.name,
@@ -243,6 +246,7 @@ export async function restoreBackup(
         values,
         custom,
       });
+      return item.archivedAt ? { ...request, archived: true } : request;
     }
 
     // 4. Items, in import batches.
@@ -375,6 +379,7 @@ export async function restoreBackup(
           metaEnc: (await move(p.metaEnc, pageAad.meta))!,
           contentEnc: await move(p.contentEnc, pageAad.content),
           favorite: p.favorite,
+          ...(p.archivedAt ? { archived: true } : {}),
         };
       } finally {
         wipe(pageKey);

@@ -342,6 +342,9 @@ model VaultItem {
   createdById      String? @db.Uuid
   /// Someone who held this item's key lost access; a manager should rotate it.
   rekeyNeeded      Boolean @default(false)
+  /// Tucked away: hidden from lists and search unless asked for. Still opens, autofills
+  /// and is checked by the Security Center. Plain metadata, like favorite.
+  archivedAt       DateTime?
 
   vault         Vault                   @relation(fields: [vaultId], references: [id], onDelete: Cascade)
   createdBy     User?                   @relation("ItemCreator", fields: [createdById], references: [id], onDelete: SetNull)
@@ -526,6 +529,8 @@ model Page {
   /// Vault key generation protectedKey is wrapped under.
   keyGen       Int       @default(1)
   favorite     Boolean   @default(false)
+  /// Hidden from the tree and search unless asked for. Set on a page and its sub-pages together.
+  archivedAt   DateTime?
   revision     Int       @default(1)
   /// Set on a page and all its descendants at once, to the same instant, so restore brings back exactly that group.
   deletedAt    DateTime?

@@ -146,6 +146,8 @@ export interface VaultItemSummary {
   createdAt: string;
   updatedAt: string;
   deletedAt: string | null;
+  /** Archived items are hidden from lists and search unless asked for. */
+  archivedAt?: string | null;
   /** Personal items: how many people it is shared with (pending invitations included). */
   sharedWith?: number;
 }
@@ -195,6 +197,8 @@ export interface UpsertItemRequest {
   collectionId?: string | null;
   favorite?: boolean;
   tags?: string[];
+  /** Create the item archived (imports). Ignored on update; use PATCH. */
+  archived?: boolean;
   fields: ItemField[];
   signals?: SecretSignals;
   usedByProjectIds?: string[];
@@ -206,6 +210,8 @@ export interface Page<T> {
   items: T[];
   nextCursor: string | null;
   total?: number;
+  /** Item lists: how many archived items the same filters left out. */
+  hiddenArchived?: number;
 }
 
 export interface ItemVersion {
@@ -254,6 +260,8 @@ export interface PageNode {
   /** {title, icon?, props?} as JSON, encrypted (pageAad.meta). */
   metaEnc: string;
   favorite: boolean;
+  /** Archived pages are hidden from the tree and search unless asked for. */
+  archivedAt: string | null;
   revision: number;
   createdAt: string;
   updatedAt: string;
@@ -274,6 +282,8 @@ export interface CreatePageRequest {
   metaEnc: string;
   contentEnc?: string | null;
   favorite?: boolean;
+  /** Imports create their pages archived. */
+  archived?: boolean;
 }
 
 export interface UpdatePageRequest {
@@ -303,6 +313,8 @@ export interface PageMeta {
   icon?: string;
   /** Database rows: property id → value. */
   props?: Record<string, PagePropValue>;
+  /** Where the page came from ({from: "notion", at}). Encrypted with the rest of the meta. */
+  imported?: { from: string; at: string };
 }
 
 export type PagePropValue = string | number | boolean | string[] | null;
