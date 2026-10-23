@@ -54,6 +54,8 @@ async function loadExisting(): Promise<ExistingItemSummary[]> {
       limit: 200,
       cursor,
       sort: "name",
+      // Duplicates of archived items are still duplicates.
+      archived: "include",
     });
     out.push(
       ...page.items.map((p) => ({

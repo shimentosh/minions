@@ -3,6 +3,7 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useMemo } from "react";
 import { setPagesIndex } from "@/components/pages/pages-context";
 import { del, get, patch, post, put } from "../api";
+import { useShowArchived } from "../archive";
 import { useSession } from "../session";
 import {
   buildNewPage,
@@ -13,7 +14,7 @@ import {
   type PageContent,
   pageKeyOf,
 } from "./crypto";
-import { indexPages, type PageEntry, type PageIndex, positionAtEnd } from "./tree";
+import { archivedSet, indexPages, type PageEntry, type PageIndex, positionAtEnd } from "./tree";
 
 /**
  * Pages as the UI sees them. The tree is one request after unlock; every
@@ -54,7 +55,18 @@ export function usePageTree(view: "active" | "trash" = "active") {
   useEffect(() => {
     if (view === "active") setPagesIndex(query.data ? index : null);
   }, [view, index, query.data]);
-  return { ...query, pages: query.data, index };
+  // Archived pages (and pages under them) are left out unless the person shows them.
+  const show = useShowArchived((s) => s.show);
+  const archived = useMemo(() => archivedSet(index), [index]);
+  const visible = useMemo(
+    () => (show || !archived.size ? query.data : query.data?.filter((p) => !archived.has(p.id))),
+    [show, archived, query.data],
+  );
+  const visibleIndex = useMemo(
+    () => (visible === query.data ? index : indexPages(visible ?? [])),
+    [visible, query.data, index],
+  );
+  return { ...query, pages: query.data, index, archived, visible, visibleIndex };
 }
 
 export interface OpenPage {
@@ -142,6 +154,12 @@ export function usePageActions() {
     },
     async favorite(id: string, favorite: boolean) {
       await patch(`/pages/${id}`, { favorite });
+      await refresh();
+    },
+    /** Archives pages with what is under them, or brings them back (with the pages above). */
+    async archive(ids: string[], archived: boolean) {
+      for (let i = 0; i < ids.length; i += 500)
+        await post("/pages/archive", { ids: ids.slice(i, i + 500), archived });
       await refresh();
     },
     async trash(id: string) {

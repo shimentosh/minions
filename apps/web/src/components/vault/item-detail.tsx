@@ -12,6 +12,7 @@ import {
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
 import {
+  Archive,
   ArchiveRestore,
   Eye,
   FolderKanban,
@@ -50,7 +51,7 @@ import { useUi } from "@/lib/ui-store";
 import { keyFor, revealField } from "@/lib/vault-crypto";
 import { FieldRow } from "./field-row";
 import { ItemPicker } from "./item-picker";
-import { useMoveDialog } from "./organize";
+import { useArchiveItems, useMoveDialog } from "./organize";
 import { ShareItemDialog } from "./share-dialog";
 
 export function Meta({ label, value }: { label: string; value: React.ReactNode }) {
@@ -327,6 +328,7 @@ export function ItemDetail({ id, onClose }: { id: string; onClose?: () => void }
   const { data: item, isLoading, error } = useItem(id);
   const openEditor = useUi((s) => s.openEditor);
   const openMove = useMoveDialog((s) => s.open);
+  const archive = useArchiveItems();
   const favorite = useToggleFavorite();
   const remove = useDeleteItem();
   const restore = useRestoreItem();
@@ -401,6 +403,16 @@ export function ItemDetail({ id, onClose }: { id: string; onClose?: () => void }
                 In trash
               </Badge>
             )}
+            {item.archivedAt && !item.deletedAt && (
+              <Badge
+                variant="outline"
+                size="sm"
+                render={<button type="button" onClick={() => archive([item], false)} />}
+                title="Archived: hidden from lists and search. Click to unarchive."
+              >
+                <Archive /> Archived
+              </Badge>
+            )}
             {!!item.sharedWith && !item.deletedAt && (
               <Badge
                 variant="info"
@@ -455,6 +467,10 @@ export function ItemDetail({ id, onClose }: { id: string; onClose?: () => void }
                   </MenuItem>
                   <MenuItem onClick={() => openMove("collection", [item])}>
                     <Layers /> Move to collection…
+                  </MenuItem>
+                  <MenuItem onClick={() => archive([item], !item.archivedAt)}>
+                    {item.archivedAt ? <ArchiveRestore /> : <Archive />}
+                    {item.archivedAt ? "Unarchive" : "Archive"}
                   </MenuItem>
                   <MenuSeparator />
                   <MenuItem

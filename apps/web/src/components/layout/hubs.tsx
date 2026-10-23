@@ -31,10 +31,10 @@ export interface Hub {
 }
 
 const vaultTab =
-  (key?: "category" | "favorite" | "trash", value?: string | boolean) =>
+  (key?: "category" | "favorite" | "trash" | "archived", value?: string | boolean) =>
   (path: string, s: Search) =>
     path === "/vault" &&
-    (key === undefined ? !s.category && !s.favorite && !s.trash : s[key] === value);
+    (key === undefined ? !s.category && !s.favorite && !s.trash && !s.archived : s[key] === value);
 
 const at = (route: string) => (path: string) => path === route;
 
@@ -82,6 +82,12 @@ export const HUBS: Hub[] = [
       },
       { label: "Authenticator", to: "/authenticator", match: at("/authenticator") },
       { label: "Notes", to: "/notes", match: (p) => p.startsWith("/notes") },
+      {
+        label: "Archived",
+        to: "/vault",
+        search: { archived: true },
+        match: vaultTab("archived", true),
+      },
       { label: "Trash", to: "/vault", search: { trash: true }, match: vaultTab("trash", true) },
     ],
   },

@@ -8,6 +8,7 @@ export interface PageEntry {
   position: string;
   kind: PageKind;
   favorite: boolean;
+  archivedAt?: string | null;
   revision: number;
   updatedAt: string;
   deletedAt: string | null;
@@ -76,6 +77,28 @@ export function positionAtEnd(index: PageIndex, parentId: string | null): string
 export function positionBetween(before: string | null, after: string | null): string {
   if (before !== null && after !== null && before >= after) return generateKeyBetween(before, null);
   return generateKeyBetween(before, after);
+}
+
+/**
+ * Pages that are archived, or sit under an archived page. A page made inside
+ * an archived page is out of sight with it, rather than jumping to the top.
+ */
+export function archivedSet(index: PageIndex): Set<string> {
+  const out = new Set<string>();
+  const visit = (p: PageEntry, hidden: boolean) => {
+    const h = hidden || !!p.archivedAt;
+    if (h) out.add(p.id);
+    for (const c of childrenOf(index, p.id)) visit(c, h);
+  };
+  for (const p of childrenOf(index, null)) visit(p, false);
+  return out;
+}
+
+/** Archived pages whose parent is not archived: one row per archived group. */
+export function archivedRoots(index: PageIndex, archived = archivedSet(index)): PageEntry[] {
+  return [...archived]
+    .map((id) => index.byId.get(id)!)
+    .filter((p) => !p.parentId || !archived.has(p.parentId));
 }
 
 /** `n` ordered positions for new pages (imports). */

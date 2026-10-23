@@ -28,6 +28,8 @@ export interface ItemFilters {
   tag?: string;
   favorite?: boolean;
   trash?: boolean;
+  /** Archived items: left out by default, shown with the rest, or shown alone. */
+  archived?: "include" | "only";
   sort?: "updated" | "name" | "recent" | "frequent" | "created";
 }
 
@@ -219,6 +221,7 @@ export interface BulkPatch {
   projectId?: string | null;
   collectionId?: string | null;
   addTags?: string[];
+  archived?: boolean;
 }
 
 /** Organises many items at once. Only plaintext metadata changes; nothing is re-encrypted. */

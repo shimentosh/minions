@@ -168,6 +168,7 @@ const routes = [
       tag: str(s.tag),
       favorite: bool(s.favorite),
       trash: bool(s.trash),
+      archived: bool(s.archived),
       sort: str(s.sort) as VaultSearch["sort"],
       item: str(s.item),
     }),
@@ -190,7 +191,7 @@ const routes = [
     path: "/pages",
     component: PagesHome,
     validateSearch: (s: Record<string, unknown>): PagesSearch => ({
-      view: s.view === "trash" ? "trash" : undefined,
+      view: s.view === "trash" || s.view === "archived" ? s.view : undefined,
     }),
   }),
   createRoute({ getParentRoute: () => rootRoute, path: "/pages/$pageId", component: PageRoute }),

@@ -1,5 +1,5 @@
 import { getItemType, type VaultItemSummary } from "@minions/core";
-import { ArrowDown, FolderKanban, Layers, Star, Users } from "lucide-react";
+import { Archive, ArrowDown, FolderKanban, Layers, Star, Users } from "lucide-react";
 import { Checkbox } from "@/components/ui/checkbox";
 import { cn } from "@/lib/cn";
 import { timeAgo } from "@/lib/format";
@@ -64,6 +64,9 @@ function Row({
                 <span className="shrink-0 rounded bg-destructive/8 px-1 font-medium text-[10px] text-destructive-foreground">
                   PROD
                 </span>
+              )}
+              {item.archivedAt && (
+                <Archive className="size-3 shrink-0 text-muted-foreground" aria-label="Archived" />
               )}
             </div>
             {item.subtitle && (

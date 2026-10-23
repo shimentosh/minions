@@ -1,6 +1,10 @@
 import { Link, useNavigate, useRouterState } from "@tanstack/react-router";
 import {
+  Archive,
+  ArchiveRestore,
   ChevronRight,
+  Eye,
+  EyeOff,
   FileText,
   MoreHorizontal,
   Plus,
@@ -15,6 +19,7 @@ import { Collapsible, CollapsiblePanel, CollapsibleTrigger } from "@/components/
 import { Menu, MenuItem, MenuPopup, MenuSeparator, MenuTrigger } from "@/components/ui/menu";
 import { SidebarGroup, SidebarGroupLabel, useSidebar } from "@/components/ui/sidebar";
 import { errorMessage } from "@/lib/api";
+import { useShowArchived } from "@/lib/archive";
 import { cn } from "@/lib/cn";
 import { usePageActions, usePageTree } from "@/lib/pages/queries";
 import {
@@ -58,17 +63,43 @@ export function PageIcon({ page, className }: { page: PageEntry; className?: str
   return <Icon className={cn("size-4 shrink-0 text-sidebar-foreground/60", className)} />;
 }
 
+/** Archive or bring back a page and everything under it, with a toast. */
+export async function toggleArchive(
+  actions: ReturnType<typeof usePageActions>,
+  ids: string[],
+  archived: boolean,
+) {
+  try {
+    await actions.archive(ids, archived);
+    const n = ids.length;
+    const what = n === 1 ? "Page" : `${n} pages`;
+    if (archived)
+      toast.success(
+        `${what} archived`,
+        useShowArchived.getState().show
+          ? "Sub-pages went with it."
+          : "Hidden with its sub-pages. Show archived pages to see them.",
+      );
+    else toast.success(`${what} brought back`);
+  } catch (e) {
+    toast.error(errorMessage(e));
+  }
+}
+
 function TreeRow({
   page,
   index,
   depth,
   activeId,
+  archived,
 }: {
   page: PageEntry;
   index: PageIndex;
   depth: number;
   activeId: string | undefined;
+  archived: Set<string>;
 }) {
+  const isArchived = archived.has(page.id);
   const kids = childrenOf(index, page.id);
   const open = useExpanded((s) => s.open.has(page.id));
   const toggle = useExpanded((s) => s.toggle);
@@ -169,8 +200,13 @@ function TreeRow({
           onClick={() => isMobile && setOpenMobile(false)}
           className="flex min-w-0 flex-1 items-center gap-2"
         >
-          <PageIcon page={page} />
-          <span className="truncate">{pageTitle(page)}</span>
+          <PageIcon page={page} className={cn(isArchived && "opacity-50")} />
+          <span className={cn("truncate", isArchived && "text-sidebar-foreground/50 italic")}>
+            {pageTitle(page)}
+          </span>
+          {page.archivedAt && (
+            <Archive className="size-3 shrink-0 text-sidebar-foreground/40" aria-label="Archived" />
+          )}
         </Link>
         <div className="flex shrink-0 items-center opacity-0 group-hover/row:opacity-100 has-[[data-popup-open]]:opacity-100">
           <Menu>
@@ -189,6 +225,10 @@ function TreeRow({
               <MenuItem onClick={() => void actions.favorite(page.id, !page.favorite)}>
                 {page.favorite ? <StarOff /> : <Star />}
                 {page.favorite ? "Remove from favorites" : "Add to favorites"}
+              </MenuItem>
+              <MenuItem onClick={() => void toggleArchive(actions, [page.id], !isArchived)}>
+                {isArchived ? <ArchiveRestore /> : <Archive />}
+                {isArchived ? "Unarchive" : "Archive"}
               </MenuItem>
               <MenuSeparator />
               <MenuItem
@@ -222,7 +262,14 @@ function TreeRow({
       {open && kids.length > 0 && (
         <ul>
           {kids.map((k) => (
-            <TreeRow key={k.id} page={k} index={index} depth={depth + 1} activeId={activeId} />
+            <TreeRow
+              key={k.id}
+              page={k}
+              index={index}
+              depth={depth + 1}
+              activeId={activeId}
+              archived={archived}
+            />
           ))}
         </ul>
       )}
@@ -243,7 +290,9 @@ function SectionLabel({ children, action }: { children: ReactNode; action?: Reac
 
 /** The Pages section of the sidebar: favorites, then the nested tree. */
 export function PageTreeSection() {
-  const { index, pages, isLoading } = usePageTree();
+  const { visibleIndex: index, visible: pages, archived, isLoading } = usePageTree();
+  const showArchived = useShowArchived((s) => s.show);
+  const setShowArchived = useShowArchived((s) => s.setShow);
   const location = useRouterState({ select: (s) => s.location });
   const activeId = location.pathname.match(/^\/pages\/([0-9a-f-]{36})/)?.[1];
   const toggle = useExpanded((s) => s.toggle);
@@ -317,7 +366,14 @@ export function PageTreeSection() {
         <CollapsiblePanel>
           <ul className="gap-0.5" onDragOver={(e) => dragging && e.preventDefault()}>
             {top.map((p) => (
-              <TreeRow key={p.id} page={p} index={index} depth={0} activeId={activeId} />
+              <TreeRow
+                key={p.id}
+                page={p}
+                index={index}
+                depth={0}
+                activeId={activeId}
+                archived={archived}
+              />
             ))}
           </ul>
           {!isLoading && top.length === 0 && (
@@ -331,7 +387,25 @@ export function PageTreeSection() {
               Trash
             </Link>
             <Link to="/import/notion">Import</Link>
+            {archived.size > 0 && (
+              <Link to="/pages" search={{ view: "archived" }}>
+                Archived
+              </Link>
+            )}
           </div>
+          {archived.size > 0 && (
+            <button
+              type="button"
+              aria-pressed={showArchived}
+              onClick={() => setShowArchived(!showArchived)}
+              className="mt-0.5 flex h-7 items-center gap-1.5 rounded-md ps-3 text-sidebar-foreground/70 text-xs hover:text-sidebar-accent-foreground"
+            >
+              {showArchived ? <EyeOff className="size-3.5" /> : <Eye className="size-3.5" />}
+              {showArchived
+                ? "Hide archived pages"
+                : `Show ${archived.size} archived page${archived.size === 1 ? "" : "s"}`}
+            </button>
+          )}
         </CollapsiblePanel>
       </SidebarGroup>
     </Collapsible>

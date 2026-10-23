@@ -2,6 +2,7 @@ import type { DatabaseProperty, PageDetail, PageMeta, PagePropValue } from "@min
 import { useQueryClient } from "@tanstack/react-query";
 import { Link, useNavigate, useParams, useSearch } from "@tanstack/react-router";
 import {
+  Archive,
   ArchiveRestore,
   FileText,
   FileUp,
@@ -15,7 +16,8 @@ import {
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Page } from "@/components/layout/page";
 import { PageEditor } from "@/components/pages/page-editor";
-import { PageIcon } from "@/components/pages/page-tree";
+import { PageIcon, toggleArchive } from "@/components/pages/page-tree";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
   Empty,
@@ -29,6 +31,7 @@ import { Menu, MenuItem, MenuPopup, MenuTrigger } from "@/components/ui/menu";
 import { Popover, PopoverPopup, PopoverTrigger } from "@/components/ui/popover";
 import { Skeleton } from "@/components/ui/skeleton";
 import { ApiError, errorMessage } from "@/lib/api";
+import { useShowArchived } from "@/lib/archive";
 import { cn } from "@/lib/cn";
 import { timeAgo } from "@/lib/format";
 import { type PageContent, pageKeyOf, uploadPageFile } from "@/lib/pages/crypto";
@@ -41,11 +44,19 @@ import {
   usePageTree,
 } from "@/lib/pages/queries";
 import { EMPTY_DOC } from "@/lib/pages/schema";
-import { ancestorsOf, childrenOf, type PageEntry, pageTitle, searchPages } from "@/lib/pages/tree";
+import {
+  ancestorsOf,
+  archivedRoots,
+  childrenOf,
+  type PageEntry,
+  type PageIndex,
+  pageTitle,
+  searchPages,
+} from "@/lib/pages/tree";
 import { toast } from "@/lib/toast";
 
 export interface PagesSearch {
-  view?: "trash";
+  view?: "trash" | "archived";
 }
 
 const MAX_FILE = 25 * 1024 * 1024;
@@ -195,7 +206,8 @@ function DatabaseTable({ open, rows }: { open: OpenPage; rows: PageEntry[] }) {
 
 function PageView({ id }: { id: string }) {
   const { data, isLoading, error } = usePage(id);
-  const { index } = usePageTree();
+  const { index, archived } = usePageTree();
+  const showArchived = useShowArchived((s) => s.show);
   const actions = usePageActions();
   const navigate = useNavigate();
   const qc = useQueryClient();
@@ -320,8 +332,12 @@ function PageView({ id }: { id: string }) {
   const page = latest.current.page ?? data.detail;
   const trashed = !!page.deletedAt;
   const entry = index.byId.get(id);
+  const isArchived = archived.has(id);
   const crumbs = ancestorsOf(index, id);
-  const kids = childrenOf(index, id);
+  // Inside an archived page everything shows; elsewhere archived sub-pages follow the switch.
+  const kids = childrenOf(index, id).filter(
+    (k) => showArchived || isArchived || !archived.has(k.id),
+  );
   const isDatabase = page.kind === "database";
 
   return (
@@ -362,6 +378,12 @@ function PageView({ id }: { id: string }) {
             </MenuTrigger>
             <MenuPopup align="end">
               {!trashed && (
+                <MenuItem onClick={() => void toggleArchive(actions, [id], !isArchived)}>
+                  {isArchived ? <ArchiveRestore /> : <Archive />}
+                  {isArchived ? "Unarchive" : "Archive with sub-pages"}
+                </MenuItem>
+              )}
+              {!trashed && (
                 <MenuItem
                   variant="destructive"
                   onClick={() =>
@@ -383,6 +405,21 @@ function PageView({ id }: { id: string }) {
       }
     >
       <div className="mx-auto w-full max-w-4xl">
+        {isArchived && !trashed && (
+          <div className="mx-4 mt-4 flex flex-wrap items-center gap-2 rounded-lg border bg-muted/50 px-3 py-2 text-sm md:mx-12">
+            <Archive className="size-4 text-muted-foreground" />
+            {entry?.archivedAt
+              ? "This page is archived. It is hidden from the page tree and search."
+              : "This page is inside an archived page. It is hidden from the page tree and search."}
+            <Button
+              size="xs"
+              variant="outline"
+              onClick={() => void toggleArchive(actions, [id], false)}
+            >
+              <ArchiveRestore /> Unarchive
+            </Button>
+          </div>
+        )}
         {trashed && (
           <div className="mx-4 mt-4 flex flex-wrap items-center gap-2 rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm md:mx-12">
             This page is in the trash.
@@ -498,21 +535,110 @@ export function PageRoute() {
   return <PageView key={pageId} id={pageId} />;
 }
 
-/** All pages: search titles, recent pages, and the trash. */
+/** A list of pages that can be ticked for bulk archiving. */
+function PageRows({
+  rows,
+  index,
+  archived,
+  selected,
+  onSelect,
+  detail,
+}: {
+  rows: PageEntry[];
+  index: PageIndex;
+  archived: Set<string>;
+  selected: Set<string>;
+  onSelect: (id: string, on: boolean) => void;
+  detail?: (p: PageEntry) => string;
+}) {
+  return (
+    <ul className="divide-y rounded-xl border">
+      {rows.map((p) => {
+        const path = ancestorsOf(index, p.id).map(pageTitle).join(" / ");
+        return (
+          <li key={p.id} className="flex items-center gap-2 ps-3 hover:bg-accent/50">
+            <input
+              type="checkbox"
+              checked={selected.has(p.id)}
+              aria-label={`Select ${pageTitle(p)}`}
+              onChange={(e) => onSelect(p.id, e.target.checked)}
+            />
+            <Link
+              to="/pages/$pageId"
+              params={{ pageId: p.id }}
+              className="flex min-w-0 flex-1 items-center gap-2 py-2 pe-3 text-sm"
+            >
+              <PageIcon page={p} />
+              <span className="min-w-0 flex-1">
+                <span className="block truncate">{pageTitle(p)}</span>
+                {path && (
+                  <span className="block truncate text-muted-foreground text-xs">{path}</span>
+                )}
+              </span>
+              {archived.has(p.id) && (
+                <Badge variant="outline" size="sm">
+                  <Archive className="size-3" /> Archived
+                </Badge>
+              )}
+              <span className="shrink-0 text-muted-foreground text-xs">
+                {detail ? detail(p) : timeAgo(p.updatedAt)}
+              </span>
+            </Link>
+          </li>
+        );
+      })}
+    </ul>
+  );
+}
+
+/** All pages: search titles, recent pages, the archive and the trash. */
 export function PagesHome() {
   const search = useSearch({ strict: false }) as PagesSearch;
   const trash = search.view === "trash";
+  const archiveView = search.view === "archived";
   const active = usePageTree();
   const trashed = usePageTree("trash");
   const actions = usePageActions();
   const navigate = useNavigate();
   const [q, setQ] = useState("");
+  const showArchived = useShowArchived((s) => s.show);
+  const setShowArchived = useShowArchived((s) => s.setShow);
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  // biome-ignore lint/correctness/useExhaustiveDependencies: a new view starts with nothing ticked
+  useEffect(() => setSelected(new Set()), [search.view]);
+  const onSelect = (id: string, on: boolean) =>
+    setSelected((s) => {
+      const next = new Set(s);
+      if (on) next.add(id);
+      else next.delete(id);
+      return next;
+    });
 
   const results = useMemo(() => {
-    const all = active.pages ?? [];
+    const all = active.visible ?? [];
     if (q.trim()) return searchPages(all, q);
     return [...all].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)).slice(0, 30);
-  }, [active.pages, q]);
+  }, [active.visible, q]);
+
+  // The archive: each archived group once, by its top page.
+  const archivedRows = useMemo(() => {
+    const roots = archivedRoots(active.index, active.archived);
+    return (q.trim() ? searchPages(roots, q, 1000) : roots).sort((a, b) =>
+      (b.archivedAt ?? "").localeCompare(a.archivedAt ?? ""),
+    );
+  }, [active.index, active.archived, q]);
+
+  const shown = archiveView ? archivedRows : results;
+  const picked = shown.filter((p) => selected.has(p.id));
+  const pickedArchived = picked.length > 0 && picked.every((p) => active.archived.has(p.id));
+  const bulk = async () => {
+    await toggleArchive(
+      actions,
+      picked.map((p) => p.id),
+      !pickedArchived,
+    );
+    setSelected(new Set());
+  };
 
   // Trash: show each deleted group once, by its top page.
   const trashRoots = useMemo(() => {
@@ -535,8 +661,8 @@ export function PagesHome() {
 
   return (
     <Page
-      title={trash ? "Trash" : "Pages"}
-      crumbs={trash ? [{ label: "Pages", to: "/pages" }] : []}
+      title={trash ? "Trash" : archiveView ? "Archived pages" : "Pages"}
+      crumbs={trash || archiveView ? [{ label: "Pages", to: "/pages" }] : []}
       actions={
         <>
           <Button size="xs" variant="outline" render={<Link to="/import/notion" />}>
@@ -550,8 +676,22 @@ export function PagesHome() {
     >
       <div className="mx-auto w-full max-w-3xl space-y-4 px-4 py-6 md:px-8">
         <div className="flex gap-2">
-          <Button size="sm" variant={trash ? "ghost" : "secondary"} render={<Link to="/pages" />}>
+          <Button
+            size="sm"
+            variant={trash || archiveView ? "ghost" : "secondary"}
+            render={<Link to="/pages" />}
+          >
             Pages
+          </Button>
+          <Button
+            size="sm"
+            variant={archiveView ? "secondary" : "ghost"}
+            render={<Link to="/pages" search={{ view: "archived" }} />}
+          >
+            <Archive /> Archived
+            {active.archived.size > 0 && (
+              <span className="text-muted-foreground tabular-nums">{archivedRows.length}</span>
+            )}
           </Button>
           <Button
             size="sm"
@@ -597,13 +737,68 @@ export function PagesHome() {
               <Input
                 value={q}
                 onChange={(e) => setQ(e.target.value)}
-                placeholder="Search page titles…"
+                placeholder={archiveView ? "Search archived pages…" : "Search page titles…"}
                 className="ps-8"
                 autoFocus
               />
             </div>
+            <div className="flex min-h-7 flex-wrap items-center gap-2 text-sm">
+              {!archiveView && active.archived.size > 0 && (
+                <label className="flex items-center gap-1.5 text-muted-foreground text-xs">
+                  <input
+                    type="checkbox"
+                    checked={showArchived}
+                    onChange={(e) => setShowArchived(e.target.checked)}
+                  />
+                  Show archived pages ({active.archived.size})
+                </label>
+              )}
+              {shown.length > 0 && (
+                <button
+                  type="button"
+                  className="text-muted-foreground text-xs hover:text-foreground"
+                  onClick={() =>
+                    setSelected(
+                      picked.length === shown.length ? new Set() : new Set(shown.map((p) => p.id)),
+                    )
+                  }
+                >
+                  {picked.length === shown.length ? "Select none" : "Select all"}
+                </button>
+              )}
+              {picked.length > 0 && (
+                <Button size="xs" variant="outline" className="ms-auto" onClick={() => void bulk()}>
+                  {pickedArchived ? <ArchiveRestore /> : <Archive />}
+                  {pickedArchived ? "Unarchive" : "Archive"} {picked.length} page
+                  {picked.length === 1 ? "" : "s"}
+                </Button>
+              )}
+            </div>
             {active.isLoading && <Skeleton className="h-40" />}
-            {!active.isLoading && (active.pages ?? []).length === 0 && (
+            {archiveView && !active.isLoading && archivedRows.length === 0 && (
+              <p className="rounded-xl border px-3 py-6 text-center text-muted-foreground text-sm">
+                {q.trim()
+                  ? "No archived page matches."
+                  : "Nothing is archived. Pages from a Notion import land here."}
+              </p>
+            )}
+            {archiveView && archivedRows.length > 0 && (
+              <>
+                <p className="text-muted-foreground text-xs">
+                  Archived pages and their sub-pages are hidden from the page tree and search.
+                  Unarchive a page to bring it back with everything under it.
+                </p>
+                <PageRows
+                  rows={archivedRows}
+                  index={active.index}
+                  archived={active.archived}
+                  selected={selected}
+                  onSelect={onSelect}
+                  detail={(p) => (p.archivedAt ? `archived ${timeAgo(p.archivedAt)}` : "")}
+                />
+              </>
+            )}
+            {!archiveView && !active.isLoading && (active.pages ?? []).length === 0 && (
               <Empty className="py-14">
                 <EmptyHeader>
                   <EmptyMedia variant="icon">
@@ -625,40 +820,40 @@ export function PagesHome() {
                 </div>
               </Empty>
             )}
-            {results.length > 0 && (
+            {!archiveView && results.length > 0 && (
               <>
                 <h2 className="font-medium text-muted-foreground text-xs uppercase tracking-wide">
                   {q.trim() ? `${results.length} found` : "Recently edited"}
                 </h2>
-                <ul className="divide-y rounded-xl border">
-                  {results.map((p) => {
-                    const path = ancestorsOf(active.index, p.id).map(pageTitle).join(" / ");
-                    return (
-                      <li key={p.id}>
-                        <Link
-                          to="/pages/$pageId"
-                          params={{ pageId: p.id }}
-                          className="flex items-center gap-2 px-3 py-2 text-sm hover:bg-accent/50"
-                        >
-                          <PageIcon page={p} />
-                          <span className="min-w-0 flex-1">
-                            <span className="block truncate">{pageTitle(p)}</span>
-                            {path && (
-                              <span className="block truncate text-muted-foreground text-xs">
-                                {path}
-                              </span>
-                            )}
-                          </span>
-                          <span className="shrink-0 text-muted-foreground text-xs">
-                            {timeAgo(p.updatedAt)}
-                          </span>
-                        </Link>
-                      </li>
-                    );
-                  })}
-                </ul>
+                <PageRows
+                  rows={results}
+                  index={active.index}
+                  archived={active.archived}
+                  selected={selected}
+                  onSelect={onSelect}
+                />
               </>
             )}
+            {!archiveView &&
+              !active.isLoading &&
+              results.length === 0 &&
+              (active.pages ?? []).length > 0 && (
+                <p className="rounded-xl border px-3 py-6 text-center text-muted-foreground text-sm">
+                  {q.trim() ? "No page title matches." : "Every page is archived."}
+                  {active.archived.size > 0 && !showArchived && (
+                    <>
+                      {" "}
+                      <button
+                        type="button"
+                        className="underline underline-offset-2"
+                        onClick={() => setShowArchived(true)}
+                      >
+                        Include archived pages
+                      </button>
+                    </>
+                  )}
+                </p>
+              )}
           </>
         )}
       </div>
