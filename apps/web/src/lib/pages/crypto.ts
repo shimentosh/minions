@@ -98,6 +98,8 @@ export async function buildNewPage(opts: {
   meta: PageMeta;
   content?: PageContent | null;
   favorite?: boolean;
+  /** Imports create their pages archived. */
+  archived?: boolean;
 }): Promise<{ request: CreatePageRequest; key: Key }> {
   const id = opts.id ?? crypto.randomUUID();
   const key = generateKey();
@@ -114,6 +116,7 @@ export async function buildNewPage(opts: {
       metaEnc: await encryptMeta(id, key, opts.meta),
       contentEnc: opts.content ? await encryptContent(id, key, opts.content) : null,
       ...(opts.favorite ? { favorite: true } : {}),
+      ...(opts.archived ? { archived: true } : {}),
     },
   };
 }

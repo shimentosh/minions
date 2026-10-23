@@ -11,7 +11,13 @@ import {
   markdownLines,
   readHtmlDatabases,
 } from "./convert";
-import { type Credential, detectCredentials, detectRowCredential } from "./credentials";
+import {
+  type Credential,
+  dedupeKey,
+  detectCredentials,
+  detectRowCredential,
+  groupOf,
+} from "./credentials";
 import { analyzeExport, type NotionExport, type NotionNode } from "./parse";
 import { readExport } from "./zip";
 
@@ -33,6 +39,8 @@ export interface ImportPlan {
   credentials: Credential[];
   byNode: Map<string, Credential[]>;
   stats: {
+    /** Finds that are another find again (same secret, account and place). */
+    duplicates: number;
     pages: number;
     databases: number;
     rows: number;
@@ -84,12 +92,27 @@ export async function planImport(files: Blob[], onProgress?: Progress): Promise<
     }
   }
 
+  // The same secret for the same account, written on several pages, is one item.
+  // The first find leads; what the others add (a URL, a username) fills it in.
+  const leaders = new Map<string, Credential>();
+  for (const c of credentials) {
+    const key = dedupeKey(c);
+    const lead = leaders.get(key);
+    if (!lead) {
+      leaders.set(key, c);
+      continue;
+    }
+    c.duplicateOf = lead.id;
+    for (const [k, v] of Object.entries(c.values)) if (!lead.values[k]) lead.values[k] = v;
+  }
+
   const attachments = [...exp.files.entries()].filter(([p]) => !/\.(md|html|csv)$/i.test(p));
   return {
     exp,
     credentials,
     byNode,
     stats: {
+      duplicates: credentials.filter((c) => c.duplicateOf).length,
       pages: nodes.filter((x) => x.kind === "page" && !x.row).length,
       databases: nodes.filter((x) => x.kind === "database").length,
       rows: nodes.filter((x) => x.row).length,
@@ -194,13 +217,30 @@ export interface WriteOptions {
   after: string | null;
   projectId?: string | null;
   collectionId?: string | null;
+  /**
+   * Archive what the import creates (default): pages and items stay out of
+   * the tree, lists and search until shown or unarchived.
+   */
+  archive?: boolean;
   onProgress?: Progress;
+}
+
+/** Items made by an import carry this tag, so they can be found together. */
+export const NOTION_IMPORT_TAG = "notion-import";
+
+/** "Workspace / Projects / Acme": where a page sat in Notion. */
+export function notionPath(exp: NotionExport, key: string): string {
+  const titles: string[] = [];
+  for (let n = exp.nodes.get(key); n; n = n.parentKey ? exp.nodes.get(n.parentKey) : undefined)
+    titles.unshift(n.title || "Untitled");
+  return titles.join(" / ");
 }
 
 /** Survives a failed run, so retrying skips what is already stored. */
 export interface WriteState {
   pageIds: Map<string, string>;
   containerId?: string;
+  /** Credential (groupOf) → the vault item made for it. */
   itemIds: Map<string, string>;
   itemsDone: boolean;
   pagesDone: Set<string>;
@@ -257,14 +297,20 @@ function ordered(exp: NotionExport, include: Set<string>): NotionNode[] {
   return out;
 }
 
+/** Whether a find becomes (or links to) a vault item. */
+const toVault = (c: Credential, opts: WriteOptions) =>
+  opts.include.has(c.nodeKey) && opts.choices.get(groupOf(c))?.vault !== false;
+
 async function createItems(plan: ImportPlan, opts: WriteOptions, state: WriteState) {
-  const chosen = plan.credentials.filter(
-    (c) =>
-      opts.include.has(c.nodeKey) &&
-      opts.choices.get(c.id)?.vault !== false &&
-      !state.itemIds.has(c.id),
-  );
+  // One item per credential: the first imported find of each makes it.
+  const wanted = plan.credentials.filter((c) => toVault(c, opts));
+  const members = new Map<string, Credential[]>();
+  for (const c of wanted) members.set(groupOf(c), [...(members.get(groupOf(c)) ?? []), c]);
+  const chosen = [...members.entries()]
+    .filter(([g]) => !state.itemIds.has(g))
+    .map(([, list]) => list[0]!);
   if (!chosen.length) return 0;
+  const archive = opts.archive !== false;
   const job = await post<{ id: string }>("/imports", {
     source: "notion",
     totalRecords: chosen.length,
@@ -277,24 +323,29 @@ async function createItems(plan: ImportPlan, opts: WriteOptions, state: WriteSta
     const entries: { sourceRow: number; item: UpsertItemRequest }[] = [];
     const ids: string[] = [];
     for (const [k, c] of slice.entries()) {
-      const choice = opts.choices.get(c.id);
+      const choice = opts.choices.get(groupOf(c));
       const id = crypto.randomUUID();
       ids.push(id);
-      const page = plan.exp.nodes.get(c.nodeKey);
       const values = { ...c.values };
-      const from = `Imported from the Notion page “${page?.title ?? "Untitled"}”.`;
-      values.notes = values.notes ? `${values.notes}\n${from}` : from;
-      entries.push({
-        sourceRow: i + k,
-        item: await encryptDraft({
-          id,
-          type: choice?.type ?? c.type,
-          name: choice?.name || c.name,
-          projectId: opts.projectId ?? null,
-          collectionId: opts.collectionId ?? null,
-          values,
-        }),
+      // Where it was written, encrypted with the item: the notes are a sensitive field.
+      const paths = [
+        ...new Set((members.get(groupOf(c)) ?? [c]).map((m) => notionPath(plan.exp, m.nodeKey))),
+      ];
+      const from =
+        paths.length > 1
+          ? `Imported from Notion, found on ${paths.length} pages:\n${paths.map((p) => `• ${p}`).join("\n")}`
+          : `Imported from Notion: ${paths[0]}`;
+      values.notes = values.notes ? `${values.notes}\n\n${from}` : from;
+      const item = await encryptDraft({
+        id,
+        type: choice?.type ?? c.type,
+        name: choice?.name || c.name,
+        projectId: opts.projectId ?? null,
+        collectionId: opts.collectionId ?? null,
+        tags: [NOTION_IMPORT_TAG],
+        values,
       });
+      entries.push({ sourceRow: i + k, item: archive ? { ...item, archived: true } : item });
     }
     // Only a rate limit is retried: after any other failure the items may exist.
     const res = await retrying(
@@ -307,7 +358,7 @@ async function createItems(plan: ImportPlan, opts: WriteOptions, state: WriteSta
     const bad = new Set(res.failed.map((f) => f.sourceRow));
     failed += bad.size;
     slice.forEach((c, k) => {
-      if (!bad.has(i + k)) state.itemIds.set(c.id, ids[k]!);
+      if (!bad.has(i + k)) state.itemIds.set(groupOf(c), ids[k]!);
     });
     opts.onProgress?.("Creating vault items", Math.min(i + 100, chosen.length), chosen.length);
   }
@@ -357,12 +408,17 @@ export async function writeImport(
     bytes += size;
   };
 
+  // Every page made here is archived (unless asked not to) and knows it was imported;
+  // the marker is inside the encrypted meta, the archived flag is all the server sees.
+  const archived = opts.archive !== false;
+  const imported = { from: "notion", at: new Date().toISOString() };
   const roots = exp.roots.filter((k) => opts.include.has(k));
   if (opts.containerTitle && !state.containerId) {
     const { request } = await buildNewPage({
       parentId: opts.parentId,
       position: generateKeyBetween(opts.after, null),
-      meta: { title: opts.containerTitle, icon: "📥" },
+      meta: { title: opts.containerTitle, icon: "📥", imported },
+      archived,
     });
     await post("/pages/batch", { pages: [request] });
     state.containerId = request.id;
@@ -389,19 +445,18 @@ export async function writeImport(
     const parentId =
       parentNode && opts.include.has(parentNode.key) ? state.pageIds.get(parentNode.key)! : top;
     const creds = plan.byNode.get(node.key) ?? [];
-    const vaultCreds = creds.filter(
-      (c) => opts.choices.get(c.id)?.vault !== false && state.itemIds.has(c.id),
-    );
+    const itemOf = (c: Credential) =>
+      toVault(c, opts) ? state.itemIds.get(groupOf(c)) : undefined;
+    const vaultCreds = creds.filter((c) => itemOf(c));
     const vaultItems = new Map(
-      creds.map((c) => [
-        c.id,
-        state.itemIds.has(c.id)
-          ? { itemId: state.itemIds.get(c.id)!, label: opts.choices.get(c.id)?.name || c.name }
-          : null,
-      ]),
+      creds.map((c) => {
+        const itemId = itemOf(c);
+        const label = opts.choices.get(groupOf(c))?.name || c.name;
+        return [c.id, itemId ? { itemId, label } : null];
+      }),
     );
 
-    const meta: PageMeta = { title: node.title };
+    const meta: PageMeta = { title: node.title, imported };
     const icon =
       node.format === "html"
         ? node.text?.match(
@@ -419,7 +474,7 @@ export async function writeImport(
       const drop = new Set(
         node.children.flatMap((k) =>
           (plan.byNode.get(k) ?? [])
-            .filter((c) => c.source === "row" && opts.choices.get(c.id)?.vault !== false)
+            .filter((c) => c.source === "row" && opts.choices.get(groupOf(c))?.vault !== false)
             .flatMap((c) => c.secretColumns ?? []),
         ),
       );
@@ -491,6 +546,7 @@ export async function writeImport(
         kind: node.kind,
         meta,
         content,
+        archived,
       });
       for (const [path, fileId] of fileIds) state.files.set(fileId, { pageId: id, path, key });
       await queue(request, node.key);
@@ -502,6 +558,7 @@ export async function writeImport(
         kind: node.kind,
         meta,
         content,
+        archived,
       });
       await queue(request, node.key);
     }

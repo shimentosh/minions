@@ -32,7 +32,12 @@ export interface Credential {
   spans: CredentialSpan[];
   /** Database rows: the columns that held secrets, dropped from the row page. */
   secretColumns?: string[];
+  /** The same credential found earlier (dedupeKey): one vault item serves both. */
+  duplicateOf?: string;
 }
+
+/** The credential a find stands for: itself, or the first find of the same secret. */
+export const groupOf = (c: Credential) => c.duplicateOf ?? c.id;
 
 const norm = (s: string) => s.toLowerCase().replace(/[^a-z0-9]/g, "");
 

@@ -30,6 +30,3 @@ export const useShowArchived = create<{
     }
   },
 }));
-
-/** The tag every item made by a Notion import carries. */
-export const NOTION_IMPORT_TAG = "notion-import";

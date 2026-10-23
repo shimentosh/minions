@@ -1,10 +1,13 @@
-import { ITEM_TYPES } from "@minions/core";
+import { getItemType, ITEM_TYPES } from "@minions/core";
 import { Link, useNavigate } from "@tanstack/react-router";
 import {
+  Archive,
   ChevronRight,
+  Copy,
   FileArchive,
   FileText,
   KeyRound,
+  Lock,
   ShieldCheck,
   Table2,
   TriangleAlert,
@@ -19,12 +22,14 @@ import { Progress, ProgressIndicator, ProgressTrack } from "@/components/ui/prog
 import { Switch } from "@/components/ui/switch";
 import { errorMessage } from "@/lib/api";
 import { cn } from "@/lib/cn";
-import { describe } from "@/lib/notion/credentials";
+import { type Credential, describe, groupOf } from "@/lib/notion/credentials";
 import {
   type CredentialChoice,
   type ImportPlan,
   MAX_ATTACHMENT,
+  NOTION_IMPORT_TAG,
   newWriteState,
+  notionPath,
   planImport,
   type WriteResult,
   writeImport,
@@ -139,6 +144,81 @@ function TreeNode({
   );
 }
 
+const SOURCE_LABEL: Record<Credential["source"], string> = {
+  text: "text",
+  table: "table",
+  code: "code block",
+  row: "database row",
+};
+
+/**
+ * One credential in the preview: what it will be called, its type, which
+ * fields were found (never their values), where it was written and how often.
+ */
+function CredentialRow({
+  plan,
+  finds,
+  choice,
+  onChange,
+}: {
+  plan: ImportPlan;
+  finds: Credential[];
+  choice: CredentialChoice;
+  onChange: (patch: Partial<CredentialChoice>) => void;
+}) {
+  const c = finds[0]!;
+  const fields = (getItemType(choice.type)?.fields ?? []).filter(
+    (f) => f.key !== "notes" && c.values[f.key],
+  );
+  const pages = [...new Set(finds.map((f) => f.nodeKey))];
+  return (
+    <div className="flex flex-wrap items-center gap-2 border-border/60 border-b px-3 py-2 last:border-b-0">
+      <Switch
+        checked={choice.vault}
+        onCheckedChange={(v) => onChange({ vault: v })}
+        aria-label={`Make a vault item of ${choice.name}`}
+      />
+      <Input
+        size="sm"
+        className="w-48 min-w-0"
+        value={choice.name}
+        aria-label="Item name"
+        onChange={(e) => onChange({ name: e.target.value })}
+        disabled={!choice.vault}
+      />
+      <SimpleSelect
+        size="sm"
+        className="w-36 min-w-0"
+        value={choice.type}
+        onChange={(v) => onChange({ type: v })}
+        options={ITEM_TYPES.map((t) => ({ value: t.type, label: t.label }))}
+      />
+      <div className="flex min-w-0 flex-1 flex-wrap items-center gap-1 text-muted-foreground text-xs">
+        <span className="me-1 truncate">{describe(c)}</span>
+        {fields.map((f) => (
+          <Badge key={f.key} variant={f.sensitive ? "warning" : "outline"} size="sm">
+            {f.sensitive && <Lock className="size-3" />}
+            {f.label}
+          </Badge>
+        ))}
+        <Badge variant="secondary" size="sm">
+          {SOURCE_LABEL[c.source]}
+        </Badge>
+        {finds.length > 1 && (
+          <Badge
+            variant="info"
+            size="sm"
+            title={pages.map((k) => notionPath(plan.exp, k)).join("\n")}
+          >
+            <Copy className="size-3" /> found {finds.length}×
+            {pages.length > 1 ? ` on ${pages.length} pages` : ""}
+          </Badge>
+        )}
+      </div>
+    </div>
+  );
+}
+
 export function NotionImportPage() {
   const fileRef = useRef<HTMLInputElement>(null);
   const navigate = useNavigate();
@@ -156,6 +236,7 @@ export function NotionImportPage() {
   const [projectId, setProjectId] = useState("");
   const [collectionId, setCollectionId] = useState("");
   const [showAllCreds, setShowAllCreds] = useState(false);
+  const [archive, setArchive] = useState(true);
   const [dragOver, setDragOver] = useState(false);
   const state = useRef(newWriteState());
   const [failed, setFailed] = useState<string | null>(null);
@@ -172,8 +253,13 @@ export function NotionImportPage() {
       const p = await planImport(zips, progress);
       setPlan(p);
       setIncludeState(new Set(p.exp.nodes.keys()));
+      // One choice per credential; repeats of it follow the first find.
       setChoices(
-        new Map(p.credentials.map((c) => [c.id, { vault: true, type: c.type, name: c.name }])),
+        new Map(
+          p.credentials
+            .filter((c) => !c.duplicateOf)
+            .map((c) => [c.id, { vault: true, type: c.type, name: c.name }]),
+        ),
       );
       state.current = newWriteState();
       setFailed(null);
@@ -219,8 +305,28 @@ export function NotionImportPage() {
     return opts;
   }, [pages, index]);
 
-  const includedCreds = (plan?.credentials ?? []).filter((c) => include.has(c.nodeKey));
-  const toVault = includedCreds.filter((c) => choices.get(c.id)?.vault !== false).length;
+  // Credentials on included pages, each once (with every page it was found on),
+  // grouped by the page of its first find.
+  const credGroups = useMemo(() => {
+    const members = new Map<string, Credential[]>();
+    for (const c of plan?.credentials ?? [])
+      if (include.has(c.nodeKey)) members.set(groupOf(c), [...(members.get(groupOf(c)) ?? []), c]);
+    const byPage = new Map<string, { path: string; creds: Credential[][] }>();
+    for (const list of members.values()) {
+      const first = list[0]!;
+      const page = byPage.get(first.nodeKey) ?? {
+        path: plan ? notionPath(plan.exp, first.nodeKey) : "",
+        creds: [],
+      };
+      page.creds.push(list);
+      byPage.set(first.nodeKey, page);
+    }
+    return [...byPage.values()].sort((a, b) => a.path.localeCompare(b.path));
+  }, [plan, include]);
+  const uniqueCreds = credGroups.reduce((n, g) => n + g.creds.length, 0);
+  const toVault = credGroups
+    .flatMap((g) => g.creds)
+    .filter((list) => choices.get(groupOf(list[0]!))?.vault !== false).length;
   const includedPages = plan ? [...include].filter((k) => plan.exp.nodes.has(k)).length : 0;
 
   async function run() {
@@ -239,6 +345,7 @@ export function NotionImportPage() {
           containerTitle: target === "container" ? containerTitle.trim() || "Notion" : null,
           projectId: projectId || null,
           collectionId: collectionId || null,
+          archive,
           onProgress: progress,
         },
         state.current,
@@ -256,7 +363,15 @@ export function NotionImportPage() {
     }
   }
 
-  const creds = showAllCreds ? includedCreds : includedCreds.slice(0, 100);
+  // Long lists show the first 100 credentials until asked for all.
+  let budget = showAllCreds ? Number.POSITIVE_INFINITY : 100;
+  const shownGroups = credGroups
+    .map((g) => {
+      const creds = g.creds.slice(0, Math.max(0, budget));
+      budget -= creds.length;
+      return { ...g, creds };
+    })
+    .filter((g) => g.creds.length);
 
   return (
     <Page title="Import from Notion" crumbs={[{ label: "Pages", to: "/pages" }]}>
@@ -352,7 +467,16 @@ export function NotionImportPage() {
                 value={plan.stats.attachments}
                 hint={formatBytes(plan.stats.attachmentBytes)}
               />
-              <Stat label="Passwords & keys found" value={plan.credentials.length} />
+              <Stat
+                label="Passwords & keys found"
+                value={plan.credentials.length - plan.stats.duplicates}
+                hint={[
+                  `on ${new Set(plan.credentials.map((c) => c.nodeKey)).size} pages`,
+                  plan.stats.duplicates ? `${plan.stats.duplicates} repeats merged` : "",
+                ]
+                  .filter(Boolean)
+                  .join(" · ")}
+              />
             </div>
 
             {failed && (
@@ -398,6 +522,20 @@ export function NotionImportPage() {
                   />
                 )}
               </div>
+              <label className="flex items-start gap-3 rounded-lg border px-3 py-2.5 text-sm">
+                <Switch checked={archive} onCheckedChange={setArchive} className="mt-0.5" />
+                <span className="space-y-0.5">
+                  <span className="flex items-center gap-1.5 font-medium">
+                    <Archive className="size-4 text-muted-foreground" /> Archive everything this
+                    import creates
+                  </span>
+                  <span className="block text-muted-foreground text-xs">
+                    Pages and vault items stay out of the page tree, vault lists and search until
+                    you turn on “Show archived” or unarchive them. Vault items are also tagged #
+                    {NOTION_IMPORT_TAG}. Autofill and the Security Center still see archived items.
+                  </span>
+                </span>
+              </label>
             </Section>
 
             <Section
@@ -433,10 +571,10 @@ export function NotionImportPage() {
               </ul>
             </Section>
 
-            {includedCreds.length > 0 && (
+            {uniqueCreds > 0 && (
               <Section
-                title={`4. Passwords and keys · ${toVault} to the vault`}
-                hint="Each becomes a vault item, and the page shows a link to it instead of the secret. Turn one off to leave its text in the page."
+                title={`4. Passwords and keys · ${toVault} of ${uniqueCreds} to the vault`}
+                hint="Each becomes a vault item, and every page it was written on shows a link to it instead of the secret. The same secret for the same account on several pages becomes one item. Turn one off to leave its text in the page. Secrets are never shown here."
                 action={
                   <div className="flex gap-1">
                     <Button
@@ -486,45 +624,34 @@ export function NotionImportPage() {
                     />
                   </div>
                 </div>
-                <div className="max-h-[28rem] overflow-y-auto">
-                  {creds.map((c) => {
-                    const choice = choices.get(c.id)!;
-                    const set = (patch: Partial<CredentialChoice>) =>
-                      setChoices((m) => new Map(m).set(c.id, { ...choice, ...patch }));
-                    return (
-                      <div
-                        key={c.id}
-                        className="flex flex-wrap items-center gap-2 border-border/60 border-b py-2 last:border-b-0"
-                      >
-                        <Switch
-                          checked={choice.vault}
-                          onCheckedChange={(v) => set({ vault: v })}
-                          aria-label="Make a vault item"
-                        />
-                        <Input
-                          size="sm"
-                          className="w-48 min-w-0"
-                          value={choice.name}
-                          onChange={(e) => set({ name: e.target.value })}
-                          disabled={!choice.vault}
-                        />
-                        <SimpleSelect
-                          size="sm"
-                          className="w-36 min-w-0"
-                          value={choice.type}
-                          onChange={(v) => set({ type: v })}
-                          options={ITEM_TYPES.map((t) => ({ value: t.type, label: t.label }))}
-                        />
-                        <span className="min-w-0 flex-1 truncate text-muted-foreground text-xs">
-                          {describe(c)} · in “{plan.exp.nodes.get(c.nodeKey)?.title}”
-                        </span>
+                <div className="max-h-[32rem] space-y-3 overflow-y-auto">
+                  {shownGroups.map((g) => (
+                    <div key={g.path} className="rounded-lg border">
+                      <div className="flex items-center gap-1.5 border-b bg-muted/40 px-3 py-1.5 text-xs">
+                        <FileText className="size-3.5 shrink-0 text-muted-foreground" />
+                        <span className="min-w-0 flex-1 truncate font-medium">{g.path}</span>
+                        <span className="text-muted-foreground tabular-nums">{g.creds.length}</span>
                       </div>
-                    );
-                  })}
+                      {g.creds.map((list) => (
+                        <CredentialRow
+                          key={list[0]!.id}
+                          plan={plan}
+                          finds={list}
+                          choice={choices.get(groupOf(list[0]!))!}
+                          onChange={(patch) =>
+                            setChoices((m) => {
+                              const id = groupOf(list[0]!);
+                              return new Map(m).set(id, { ...m.get(id)!, ...patch });
+                            })
+                          }
+                        />
+                      ))}
+                    </div>
+                  ))}
                 </div>
-                {includedCreds.length > creds.length && (
+                {uniqueCreds > 100 && !showAllCreds && (
                   <Button size="xs" variant="ghost" onClick={() => setShowAllCreds(true)}>
-                    Show all {includedCreds.length}
+                    Show all {uniqueCreds}
                   </Button>
                 )}
               </Section>
@@ -562,6 +689,23 @@ export function NotionImportPage() {
                 the page.
               </p>
             )}
+            {archive && (
+              <p className="flex items-start gap-1.5 text-sm">
+                <Archive className="mt-0.5 size-4 shrink-0 text-muted-foreground" />
+                <span>
+                  Everything imported is archived, so it is hidden until you want it. Find it under{" "}
+                  <Link to="/pages" search={{ view: "archived" }} className="underline">
+                    Pages → Archived
+                  </Link>{" "}
+                  and{" "}
+                  <Link to="/vault" search={{ archived: true }} className="underline">
+                    Vault → Archived
+                  </Link>
+                  , or turn on “Show archived”. Unarchive the top page to bring the whole import
+                  into the page tree.
+                </span>
+              </p>
+            )}
             <p className="flex items-start gap-1.5 text-muted-foreground text-xs">
               <ShieldCheck className="mt-px size-3.5 shrink-0 text-emerald-500" />
               Delete the export .zip from your computer now.
@@ -580,7 +724,15 @@ export function NotionImportPage() {
                 </Button>
               )}
               {step.result.items > 0 && (
-                <Button variant="outline" render={<Link to="/vault" />}>
+                <Button
+                  variant="outline"
+                  render={
+                    <Link
+                      to="/vault"
+                      search={archive ? { archived: true, tag: NOTION_IMPORT_TAG } : {}}
+                    />
+                  }
+                >
                   See vault items
                 </Button>
               )}
