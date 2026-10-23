@@ -31,6 +31,20 @@ the security review gate are in [THREAT_MODEL.md](THREAT_MODEL.md).
 | Auto-lock | The client locks on idle. The server refuses vault routes once the unlock window passes; the window slides only with real use. | `vault.test.ts` "locks by itself"; smoke test lock/unlock |
 | Device and session revocation, emergency lock | Revoking ends sessions immediately; emergency lock ends all of them, including the caller's. | `auth.test.ts` |
 
+## Pages and the Notion import
+
+| Requirement | How it is enforced | Verified by |
+|---|---|---|
+| No plaintext page titles, content or files in PostgreSQL | Per-page key wrapped by the vault key; meta, content and files encrypted under it on the client. The API refuses a non-envelope `protectedKey`/`metaEnc`/`contentEnc`, and file bytes or names that are not encrypted (`PLAINTEXT_SECRET`). | `pages.test.ts` "round-trips an encrypted page tree and stores no plaintext", "refuses plaintext…", "stores files as ciphertext only" (dumps tables) |
+| Ciphertext bound to its page and file | AAD `vault:<vid>:page:<id>:key`, `page:<id>:meta`, `page:<id>:content`, `page:<id>:file:<fid>` | `blob.test.ts` (wrong file id, wrong key, tampering refused) |
+| Isolation | Every page, version and file is looked up with the session's vault; parents must be in the same vault; smuggled `vaultId` rejected | `pages.test.ts` "keeps every page in its owner's vault" |
+| Tree integrity | No cycles; trash and restore work on one sub-tree group | `pages.test.ts` "moves pages without ever making a cycle", "trashes and restores a sub-tree as one group" |
+| Rotation covers pages | Page keys re-wrapped; finish refused until every page moved; plaintext refused | `pages.test.ts` "re-wraps page keys…", `tests/e2e/rotation.mjs` |
+| Backups include pages, still encrypted | Export carries wrapped page keys and envelopes; restore re-wraps on the device | `pages.test.ts` "includes pages in the encrypted backup", `tests/e2e/backup.mjs` |
+| Import stays on the device | The export is read in the tab; nothing is sent before Import; the plan step makes no request | `importer.test.ts` "…sending nothing", `tests/e2e/pages.mjs` |
+| Imported HTML cannot run | Parsed in an inert `DOMParser` document, sanitised by DOMPurify, then reduced to the editor schema; links only http(s)/mailto or internal ids; no remote images | `convert.test.ts` (scripts, handlers and the page title dropped) |
+| Secrets in imported pages become vault items | Detected on the device, removed from page text, created as encrypted items, a chip left in place | `credentials.test.ts`, `convert.test.ts`, `tests/e2e/pages.mjs` |
+
 ## Known limits
 
 - The server sees safe metadata (names, hosts, usernames, providers, tags) and
@@ -39,6 +53,9 @@ the security review gate are in [THREAT_MODEL.md](THREAT_MODEL.md).
   passwords. This is what makes server-side search, reuse detection and the
   Security Center possible without decrypting anything.
 - Note bodies are encrypted, so note search covers titles, tags and organisation only.
+- Pages leak their tree's shape, sibling order, page/database kind, times and sizes
+  (see THREAT_MODEL.md R12). Page files are not in backups yet, and there is no
+  per-account storage quota for them.
 - The extension clears the clipboard 30 s after a copy from an offscreen
   document, also after the popup closes; it clears unconditionally, since
   checking the current contents would need `clipboardRead`. Tested in

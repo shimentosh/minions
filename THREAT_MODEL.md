@@ -29,6 +29,7 @@ and restores full end-to-end encryption for that account.
 | Master password | User's head, briefly in client memory | Never sent or stored. Argon2id (64 MiB, t=3) on the client. |
 | Vault key / user key | Client memory only (web: module scope; extension: `chrome.storage.session`) | Wrapped (AES-GCM) by the user key / stretched master key. Wipe on lock. |
 | Usernames, item names, hosts, tags, projects | Plaintext columns | Server-side authorization only. **Readable from a DB dump** (see R1). |
+| Pages: titles, icons, content, database schemas and values, files | `pages.meta_enc`, `pages.content_enc`, `page_versions`, `page_files` | AES-256-GCM under a per-page key wrapped by the vault key, AAD bound to page and file. Server refuses plaintext. Tree shape, order and sizes are visible (R12). |
 | Session tokens | Client: HttpOnly cookie (web), OS keychain (desktop), the extension origin's IndexedDB (extension; unreadable by content scripts, so it stays signed in across restarts while the vault key does not persist) | 256-bit random; DB stores SHA-256 only; revocable; 30-day expiry. |
 | Account TOTP secret | `users.twoFactorSecretEnc` | AES-GCM under `SERVER_ENCRYPTION_KEY`. Readable by whoever holds that key. |
 | User key copy for email reset | `users.recoveryKeyEnc` (accounts with email reset on, the default) | AES-GCM under `SERVER_ENCRYPTION_KEY`, AAD bound to the user. **With that key and a DB dump, the vault is readable.** Deleted when email reset is turned off. |
@@ -71,6 +72,8 @@ and restores full end-to-end encryption for that account.
 | Team workspaces | Cross-workspace access, removed members, server key substitution | Membership resolved from the session on every route; per-item and workspace keys sealed per member; revocation in one transaction plus re-keying; fingerprint comparison at confirm (R6). |
 | Operator dashboard | Exposure of the account list (emails, names, activity dates) | Allowlist + unlocked vault + 2FA, 404 for everyone else, every view audit-logged, no vault content. Allowlist is by account id, because emails are unverified (R11). |
 | Email verification | Account squatting on someone else's address, link theft | Single-use hashed token in the URL fragment (not sent to servers or logs), 24 h expiry, atomic use, throttled; invitations need a verified address. |
+| Pages | Plaintext stored by a buggy client, cross-account access, tree corruption, content making the browser load remote resources | Envelope/blob checks on every write; every lookup scoped by the session's vault; parents checked, cycles refused; images and files only from encrypted page files (no `src` in content), shown as `blob:` URLs. |
+| Notion import | A crafted export: script in HTML, hostile links, zip bombs, huge files | Read in the tab only; HTML parsed in an inert document, sanitised by DOMPurify and reduced to the editor schema; links limited to http(s)/mailto or internal ids; files over 25 MiB skipped; nested zips opened at most three levels deep. Decompression size is bounded by the browser's memory, not checked (R12). |
 | Key rotation | Plaintext or dropped secrets, mixed keys | Server requires every sensitive field and history entry back as an envelope; other writes and exports are refused until the swap; per-row key generation makes resume and retries safe. |
 
 ## Residual risks and open decisions
@@ -146,6 +149,16 @@ limit. They are listed so nobody mistakes them for solved.
   emails. Tested in `email-verification.test.ts`, `operator.test.ts` and
   `tests/e2e/verify-email.mjs`. The key-fingerprint comparison at confirm still
   protects against a malicious server substituting a public key (R6).
+
+- **R12. Pages: what still shows, and what is not built yet.** Page titles and
+  content are ciphertext (stricter than notes, whose titles are plaintext), but a DB
+  dump shows how many pages there are, how they nest, their order, which are
+  databases, when they changed and how large they are ("a database with 400 rows").
+  Email reset (on by default) covers pages like everything else under the user key.
+  Not yet built: pages in team workspaces and page sharing (needs its own review, as
+  R6), page files in backups, a per-account storage quota for page files (PostgreSQL
+  `bytea`; an account can store as many 25 MiB files as the disk holds), and a bound
+  on how much a crafted zip may decompress to in the browser.
 
 ## Recovery and lifecycle
 

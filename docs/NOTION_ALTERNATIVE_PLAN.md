@@ -188,20 +188,44 @@ created keep their ids, so a retry skips them.
 
 ### Scale
 
-Tested target: 10,000 pages and 1 GB of attachments in one import. Text entries are
-small and parsed incrementally with yields to the UI; attachments are streamed out of
-the zip one at a time; requests are batched; memory stays bounded by the largest single
-attachment. Files above the per-file cap (25 MB in phase 1) are listed in the report and
-skipped, never truncated.
+Target: 10,000 pages and 1 GB of attachments in one import. Text entries are small and
+parsed incrementally with yields to the UI; attachments are read out of the zip one at a
+time when they are written; requests are batched and retried through rate limits. Files
+above the per-file cap (25 MB in phase 1) are listed in the report and skipped, never
+truncated.
+
+Measured (`tests/bench/notion-import.mjs`, laptop, local dev stack): 10,000 pages, 300
+database rows and 1,000 small images preview in ~9 s and import in ~12 s; the tab's JS
+heap peaked near 490 MB, because every page's text is held until the import ends.
+Releasing text as pages are written is a phase 2 item; real networks and large images
+will be slower than this.
 
 ## 5. Roadmap
 
 | Phase | Contents | Priority |
 |---|---|---|
-| **1 Encrypted pages foundation + import** | `pages`, `page_versions`, `page_files` tables and migration; `/pages` API (tree, get, batch create, update with revision check, move with cycle check, trash/restore/purge, versions, files); rotation and backup include pages; web: Pages section in the sidebar with the nested tree, page view with the block editor (all core blocks, slash menu, page links, item chips, encrypted images/files), title search; Notion importer (Markdown & CSV and HTML, nested zips, hierarchy, databases as table pages, credential extraction, preview/organise, batched encrypted write); tests; docs | **P0** (this branch) |
+| **1 Encrypted pages foundation + import** (built on this branch; see below) | `pages`, `page_versions`, `page_files` tables and migration; `/pages` API (tree, get, batch create, update with revision check, move with cycle check, trash/restore/purge, versions, files); rotation and backup include pages; web: Pages section in the sidebar with the nested tree, page view with the block editor (all core blocks, slash menu, page links, item chips, encrypted images/files), title search; Notion importer (Markdown & CSV and HTML, nested zips, hierarchy, databases as table pages, credential extraction, preview/organise, batched encrypted write); tests; docs | **P0** (this branch) |
 | 2 Databases & knowledge | Property editing, table/board/list/gallery/calendar views, filters/sorts/groups, relations; full-text search (MiniSearch); backlinks and `@` page mentions; templates; history UI with restore; block drag handle; covers; Markdown/HTML export; files in backups; CI workflow | P1 |
 | 3 Teams & sharing | Pages in workspaces (page key wrapped by the workspace key), per-page grants inherited down the tree, re-keying on member removal, share a page with a person or by link, comments, activity on pages; independent review of the design (R6) | P1 |
 | 4 Collaboration & reach | Real-time co-editing with encrypted Yjs updates, offline cache (encrypted), desktop and mobile polish, page import from Markdown folders, Confluence and Evernote | P2 |
+
+### Phase 1 as built
+
+Done: the three tables and migration; `/pages` (tree, get, batch create, revision-checked
+save with versions, move with cycle check, trash/restore/purge, encrypted files); page
+keys in vault-key rotation and in encrypted backups (export and restore); the sidebar
+tree (favorites, expand, add inside, drag to reorder or nest, trash); the page view
+(icon, title, block editor with slash menu, all core blocks, encrypted images and files
+by upload or paste, sub-pages, page links, vault-item chips, autosave); database pages
+as a read-only table of their rows; `/pages` with title search and the trash; and the
+Notion importer as designed above, with the preview step. Tests: API integration
+(`pages.test.ts`), core (`blob.test.ts`), web unit tests for the tree and every importer
+stage, and browser tests (`tests/e2e/pages.mjs`, plus pages in `backup.mjs` and
+`rotation.mjs`).
+
+Left for phase 2 (as planned there): editing database properties and views, version
+history UI, content search, block drag handle, covers, files in backups, and lowering
+the importer's memory use on very large exports.
 
 Not planned: a server-side Notion API importer. The Notion API cannot be called from the
 browser (CORS), so a server proxy would see plaintext; a desktop-app-only connector can
