@@ -124,6 +124,21 @@ export async function analyzeExport(
   const warnings: string[] = [];
   /** Folder path → the node whose sub-pages it holds. */
   const folderOwner = new Map<string, string>();
+  /**
+   * Newer exports name sub-page folders by title alone ("Projects/"), some by
+   * the id alone. Used when no "<Title> <id>" folder matches; a title two
+   * siblings share (null) is not guessed.
+   */
+  const looseOwner = new Map<string, string | null>();
+  const claim = (folder: string, key: string) => {
+    const had = looseOwner.get(folder);
+    looseOwner.set(folder, had === undefined || had === key ? key : null);
+  };
+  const claimLoose = (dir: string, title: string, id: string | null, key: string) => {
+    const prefix = dir ? `${dir}/` : "";
+    if (title) claim(`${prefix}${title}`, key);
+    if (id) claim(`${prefix}${id}`, key);
+  };
 
   const csvs = [...files.entries()].filter(([p]) => /\.csv$/i.test(p));
   const pageFiles = [...files.entries()].filter(([p]) => PAGE_EXT.test(p));
@@ -164,6 +179,7 @@ export async function analyzeExport(
       `${dirname(path) ? `${dirname(path)}/` : ""}${name.replace(/_all$/i, "")}`,
       key,
     );
+    claimLoose(dirname(path), title, id, key);
     tick();
   }
 
@@ -182,6 +198,7 @@ export async function analyzeExport(
     node.dir = dirname(path);
     node.text = await file.text();
     folderOwner.set(path.replace(PAGE_EXT, ""), key);
+    claimLoose(dirname(path), title, id, key);
     tick();
   }
 
@@ -189,7 +206,7 @@ export async function analyzeExport(
   for (const node of nodes.values()) {
     let dir = node.dir;
     while (dir) {
-      const owner = folderOwner.get(dir);
+      const owner = folderOwner.get(dir) ?? looseOwner.get(dir);
       if (owner && owner !== node.key) {
         node.parentKey = owner;
         break;
@@ -214,16 +231,14 @@ export async function analyzeExport(
     }
     databases.set(db.key, { key: db.key, columns });
     const titleCol = columns[0] ?? "Name";
-    const waiting = new Map<string, NotionNode[]>();
-    for (const n of nodes.values()) {
-      if (n.parentKey !== db.key) continue;
-      const list = waiting.get(n.title) ?? [];
-      list.push(n);
-      waiting.set(n.title, list);
-    }
+    const pages = [...nodes.values()].filter((n) => n.parentKey === db.key);
+    const matches = matchRows(
+      rows.map((r) => (r[titleCol] ?? "").trim()),
+      pages,
+    );
     rows.forEach((row, i) => {
       const title = (row[titleCol] ?? "").trim();
-      const match = waiting.get(title)?.shift();
+      const match = matches[i];
       if (match) {
         match.row = row;
         match.rowIndex = i;
@@ -266,6 +281,43 @@ export async function analyzeExport(
   if (!nodes.size)
     warnings.push("No Notion pages were found. Export as “Markdown & CSV” or “HTML”.");
   return { nodes, roots, databases, files, byNotionId, warnings };
+}
+
+const loose = (s: string) =>
+  s
+    .normalize("NFKC")
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}]/gu, "");
+
+/**
+ * Pairs CSV rows with the row pages in a database folder. File names are the
+ * title with some characters dropped or replaced, cut short when long, and
+ * "Untitled" when empty, so after exact titles come titles compared without
+ * case and punctuation, then by prefix, then untitled rows. Order is kept.
+ */
+export function matchRows(titles: string[], pages: NotionNode[]): (NotionNode | undefined)[] {
+  const out: (NotionNode | undefined)[] = titles.map(() => undefined);
+  const left = new Set(pages);
+  const pass = (same: (title: string, page: NotionNode) => boolean) => {
+    titles.forEach((t, i) => {
+      if (out[i]) return;
+      for (const p of left)
+        if (same(t, p)) {
+          out[i] = p;
+          left.delete(p);
+          return;
+        }
+    });
+  };
+  pass((t, p) => t === p.title);
+  pass((t, p) => !!loose(t) && loose(t) === loose(p.title));
+  pass((t, p) => {
+    const a = loose(t);
+    const b = loose(p.title);
+    return Math.min(a.length, b.length) >= 6 && (a.startsWith(b) || b.startsWith(a));
+  });
+  pass((t, p) => !loose(t) && (!p.title || /^untitled$/i.test(p.title)));
+  return out;
 }
 
 /** Every node under (and including) `key`. */

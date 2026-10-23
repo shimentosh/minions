@@ -1,5 +1,13 @@
 import { describe, expect, it } from "vitest";
-import { detectCredentials, detectRowCredential, redactLines, tokenFor } from "./credentials";
+import {
+  classifyLabel,
+  dedupeKey,
+  detectCredentials,
+  detectRowCredential,
+  redactLines,
+  secretColumnsOf,
+  tokenFor,
+} from "./credentials";
 
 const ctx = () => {
   let n = 0;
@@ -93,6 +101,94 @@ describe("finding credentials in pages", () => {
     for (const c of found) expect(out).toContain(tokenFor(c.id));
   });
 
+  it("reads labels with a service in front, and splits accounts by service", () => {
+    const lines = [
+      "## Email accounts",
+      "Gmail user: me@gmail.test",
+      "Gmail password: g-pass-1",
+      "Recovery email: backup@acme.test",
+      "🔑 Outlook pass: o-pass-2",
+      "Root password (new): r00t!x",
+    ];
+    const found = detectCredentials(lines, ctx());
+    expect(found.map((c) => [c.name, c.values.password])).toEqual([
+      ["Gmail", "g-pass-1"],
+      ["Outlook", "o-pass-2"],
+      // "Root" says which account, not which service: the heading names it.
+      ["Email accounts", "r00t!x"],
+    ]);
+    expect(found[0]!.values).toMatchObject({
+      email: "me@gmail.test",
+      recovery_email: "backup@acme.test",
+    });
+  });
+
+  it("reads several labels on one line, and labels with the value on the next line", () => {
+    const found = detectCredentials(
+      [
+        "Account username: alice, password: a-1!",
+        "user: bob | pass: b-2!",
+        "",
+        "**Password**",
+        "",
+        "- c-3!",
+      ],
+      ctx(),
+    );
+    expect(found.map((c) => [c.values.username, c.values.password])).toEqual([
+      ["alice", "a-1!"],
+      ["bob", "b-2!"],
+      [undefined, "c-3!"],
+    ]);
+    expect(found[2]!.spans).toEqual([{ line: 5, raw: "c-3!" }]);
+  });
+
+  it("reads two-column tables top to bottom", () => {
+    const lines = ["| Username | admin |", "| --- | --- |", "| Password | t4ble! |"];
+    const [c, ...rest] = detectCredentials(lines, ctx());
+    expect(rest).toEqual([]);
+    expect(c!.values).toMatchObject({ username: "admin", password: "t4ble!" });
+    expect(redactLines(lines, [c!]).join("\n")).not.toContain("t4ble!");
+  });
+
+  it("ignores placeholders, prose after a label, and generic names", () => {
+    const found = detectCredentials(
+      [
+        "Password: N/A",
+        "Password: ask Sam in the office for the current one please",
+        "WiFi password: is on the fridge",
+        "Boarding pass: Gate 12",
+        "",
+        "## Credentials",
+        "Password: real-1!",
+      ],
+      ctx(),
+    );
+    expect(found.map((c) => c.values.password)).toEqual(["real-1!"]);
+    // "Credentials" says nothing; the page title does.
+    expect(found[0]!.name).toBe("Accounts");
+  });
+
+  it("knows what labels mean", () => {
+    expect(classifyLabel("Gmail password")).toMatchObject({ label: "password", service: "Gmail" });
+    expect(classifyLabel("Stripe secret key")).toMatchObject({
+      label: "secretkey",
+      service: "Stripe",
+      secret: true,
+    });
+    expect(classifyLabel("Admin user")).toMatchObject({ label: "user", service: "" });
+    expect(classifyLabel("Recovery mail")).toMatchObject({ label: "recoveryemail" });
+    expect(classifyLabel("Favourite colour")).toBeNull();
+  });
+
+  it("treats the same secret for the same account as one credential", () => {
+    const a = detectCredentials(["Email: me@acme.test", "Password: same-1!"], ctx())[0]!;
+    const b = detectCredentials(["## Again", "E-mail: ME@acme.test", "Pass: same-1!"], ctx())[0]!;
+    const other = detectCredentials(["Email: you@acme.test", "Password: same-1!"], ctx())[0]!;
+    expect(dedupeKey(a)).toBe(dedupeKey(b));
+    expect(dedupeKey(a)).not.toBe(dedupeKey(other));
+  });
+
   it("recognises credential databases by their columns", () => {
     const columns = ["Name", "URL", "Username", "Password"];
     const row = { Name: "GitHub", URL: "https://github.com", Username: "dev", Password: "pw-1!" };
@@ -105,5 +201,6 @@ describe("finding credentials in pages", () => {
     });
     expect(detectRowCredential({ Name: "x", Password: "" }, columns, ctx())).toBeNull();
     expect(detectRowCredential({ Name: "x", Notes: "y" }, ["Name", "Notes"], ctx())).toBeNull();
+    expect(secretColumnsOf(["Name", "Admin Password 🔑", "Status"])).toEqual(["Admin Password 🔑"]);
   });
 });

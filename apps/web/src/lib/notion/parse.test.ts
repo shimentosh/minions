@@ -1,6 +1,14 @@
 import { describe, expect, it } from "vitest";
-import { exportFiles, ID } from "./fixtures";
-import { analyzeExport, markdownBody, notionIdIn, resolvePath, splitName } from "./parse";
+import { exportFiles, ID, workspaceFiles } from "./fixtures";
+import {
+  analyzeExport,
+  markdownBody,
+  matchRows,
+  type NotionNode,
+  notionIdIn,
+  resolvePath,
+  splitName,
+} from "./parse";
 
 describe("Notion export structure", () => {
   it("reads names, ids and links", () => {
@@ -64,6 +72,51 @@ describe("Notion export structure", () => {
     const stripe = exp.nodes.get(accounts.children[1]!)!;
     expect(stripe.title).toBe("Stripe");
     expect(stripe.file).toBeUndefined();
+  });
+
+  it("reads newer exports, whose sub-page folders are named by title alone", async () => {
+    const files = Object.fromEntries(
+      Object.entries(workspaceFiles()).map(([path, content]) => [
+        path
+          .replace(`Company Handbook ${ID.handbook}/`, "Company Handbook/")
+          .replace(`Accounts ${ID.accounts}/`, "Accounts/"),
+        content,
+      ]),
+    );
+    const exp = await analyzeExport(exportFiles(files));
+    expect(exp.roots.sort()).toEqual([ID.handbook, ID.servers].sort());
+    expect(exp.nodes.get(ID.onboarding)!.parentKey).toBe(ID.handbook);
+    expect(exp.nodes.get(ID.accounts)!.children).toEqual([ID.github, ID.stripe]);
+    expect(exp.nodes.get(ID.github)!.row).toMatchObject({ Name: "GitHub" });
+  });
+
+  it("does not guess a folder two pages could own", async () => {
+    const exp = await analyzeExport(
+      exportFiles({
+        [`Notes ${ID.handbook}.md`]: "# Notes",
+        [`Notes ${ID.servers}.md`]: "# Notes",
+        [`Notes/Child ${ID.onboarding}.md`]: "# Child",
+      }),
+    );
+    expect(exp.nodes.get(ID.onboarding)!.parentKey).toBeNull();
+  });
+
+  it("pairs CSV rows with row pages whose file names lost characters", () => {
+    const page = (title: string) => ({ title }) as NotionNode;
+    const pages = [
+      page("Untitled"),
+      page("Q3 Plan Budget"),
+      page("A very long row title that Notion cut s"),
+      page("Exact"),
+    ];
+    const titles = [
+      "Exact",
+      "Q3 Plan: Budget",
+      "A very long row title that Notion cut short in the file name",
+      "",
+      "No page",
+    ];
+    expect(matchRows(titles, pages)).toEqual([pages[3], pages[1], pages[2], pages[0], undefined]);
   });
 
   it("says so when there is nothing to import", async () => {

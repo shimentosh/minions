@@ -224,9 +224,25 @@ function toDoc(doc: Document): unknown {
 
 // ─── Lines (credential detection and redaction share them) ───────────────────
 
-/** Markdown: the page body's lines. */
+/**
+ * Markdown: the page body's lines. Notion writes line breaks inside a block
+ * as `<br>`; each part becomes its own line (ending in two spaces, Markdown's
+ * line break) so "User: a<br>Password: b" reads as two labels. Tables and
+ * code keep theirs.
+ */
 export function markdownLines(node: NotionNode): string[] {
-  return markdownBody(node).split("\n");
+  const out: string[] = [];
+  let fenced = false;
+  for (const line of markdownBody(node).split("\n")) {
+    if (/^\s*(```|~~~)/.test(line)) fenced = !fenced;
+    if (fenced || /^\s*\|/.test(line) || !/<br\s*\/?>/i.test(line)) {
+      out.push(line);
+      continue;
+    }
+    const parts = line.split(/<br\s*\/?>/i);
+    for (const [i, p] of parts.entries()) out.push(i < parts.length - 1 ? `${p.trimEnd()}  ` : p);
+  }
+  return out;
 }
 
 /** The body of an HTML page as an inert document. */
@@ -241,6 +257,21 @@ interface HtmlLines {
   lines: string[];
   /** Line → the element it came from (tables: the row). */
   els: (Element | null)[];
+}
+
+/** A block's text, one line per `<br>` ("User: a<br>Password: b" is two labels). */
+function brLines(e: Element): string[] {
+  if (!e.querySelector("br")) return [e.textContent?.trim() ?? ""];
+  const out = [""];
+  const walk = (n: Node) => {
+    for (const c of n.childNodes) {
+      if (c.nodeType === Node.TEXT_NODE) out[out.length - 1] += c.textContent ?? "";
+      else if ((c as Element).tagName === "BR") out.push("");
+      else walk(c);
+    }
+  };
+  walk(e);
+  return out.map((s) => s.trim());
 }
 
 /**
@@ -273,7 +304,7 @@ export function htmlLines(doc: Document): HtmlLines {
           if (i === 0) push(`|${" --- |".repeat(tr.children.length)}`, null);
         });
       } else if (tag === "P" || (tag === "LI" && !e.querySelector("ul, ol, p, div"))) {
-        push(e.textContent?.trim() ?? "", e);
+        for (const l of brLines(e)) push(l, e);
       } else if (e.children.length) walk(e);
       else if (e.textContent?.trim()) push(e.textContent.trim(), e);
       push("", null);

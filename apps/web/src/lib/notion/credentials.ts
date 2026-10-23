@@ -70,6 +70,8 @@ const SECRET_LABELS = new Set(
     "dsn",
     "cvv",
     "cvc",
+    "card number",
+    "card no",
   ].map(norm),
 );
 
@@ -109,23 +111,198 @@ const OTHER_LABELS = new Set(
   ].map(norm),
 );
 
+/** Labels that can carry the name of a service in front: "Gmail user", "AWS email". */
+const QUALIFIABLE = new Set(
+  ["user", "username", "user name", "login", "userid", "user id", "id", "email", "mail", "url"].map(
+    norm,
+  ),
+);
+
+/** Words in front of a label that say which account, not which service: "Admin password". */
+const ROLE_WORDS = new Set(
+  (
+    "admin administrator root master main my new old current previous default login account " +
+    "user app the primary personal work"
+  ).split(" "),
+);
+
+/** "Recovery email", "Backup mail": go to the login's recovery field. */
+const RECOVERY_WORDS = new Set(["recovery", "backup", "secondary", "alternate", "alternative"]);
+
+/** Values that stand in for a secret rather than being one. */
+const PLACEHOLDER =
+  /^(?:n\/?a|none|nil|null|-+|—|tbd|todo|unknown|same(?: as (?:above|before|that))?|\?+|x{3,}|\*{3,}|•+|\.{3}|…|empty)$/i;
+
 /** Undoes Markdown backslash escapes (Notion escapes `*`, `_`, `\`…). */
 export const unescapeMd = (s: string) => s.replace(/\\([\\`*_{}[\]()#+\-.!|>~<])/g, "$1");
 
-// "Password: x", "- **Email**: x", "1. API key = x"
-const LABEL_LINE =
-  /^\s*(?:[-*+]\s+|\d+[.)]\s+)?(?:\*\*|__)?([A-Za-z][A-Za-z0-9 ./_-]{0,30}?)(?:\*\*|__)?\s*(?::|=|\s[-–]\s)\s*(.+?)\s*$/;
+export interface Label {
+  /** The label without its qualifier, normalized ("password", "apikey"). */
+  label: string;
+  /** The same, as written, for smart fill ("password", "api key"). */
+  canon: string;
+  /** The service written in front ("Gmail" in "Gmail password"), if any. */
+  service: string;
+  secret: boolean;
+  /** The whole label is a known one, not a qualified one. */
+  exact: boolean;
+}
 
-function labelOf(line: string): { label: string; raw: string; secret: boolean } | null {
-  const m = line.match(LABEL_LINE);
-  if (!m) return null;
-  const label = norm(m[1]!);
-  const raw = m[2]!.replace(/^(\*\*|__|`)|(\*\*|__|`)$/g, "").trim();
-  if (!raw) return null;
-  if (SECRET_LABELS.has(label)) return { label, raw, secret: true };
-  if (OTHER_LABELS.has(label)) return { label, raw, secret: false };
+/**
+ * What a label means: "Password", "Gmail password", "🔑 WiFi pass",
+ * "Root password (new)", "Mail user". Null when it is not about a credential.
+ */
+export function classifyLabel(text: string): Label | null {
+  const clean = unescapeMd(text)
+    .replace(/\([^)]*\)/g, " ")
+    .replace(/[*_`]/g, "")
+    .replace(/^[^\p{L}\p{N}]+/u, "")
+    .trim();
+  if (!clean || clean.length > 40) return null;
+  const n = norm(clean);
+  const lower = clean.toLowerCase();
+  if (SECRET_LABELS.has(n))
+    return { label: n, canon: lower, service: "", secret: true, exact: true };
+  if (OTHER_LABELS.has(n))
+    return { label: n, canon: lower, service: "", secret: false, exact: true };
+  const words = clean.split(/[\s./_-]+/).filter(Boolean);
+  if (words.length < 2 || words.length > 5) return null;
+  // The longest known label at the end wins ("Stripe secret key" → "secret key").
+  for (let k = Math.min(3, words.length - 1); k >= 1; k--) {
+    const tailWords = words.slice(-k);
+    const tail = norm(tailWords.join(" "));
+    const front = words.slice(0, -k);
+    const secret = SECRET_LABELS.has(tail);
+    if (!secret && !QUALIFIABLE.has(tail)) continue;
+    const frontLower = front.map((w) => w.toLowerCase());
+    if (!secret && frontLower.length === 1 && RECOVERY_WORDS.has(frontLower[0]!)) {
+      if (tail === "email" || tail === "mail")
+        return {
+          label: "recoveryemail",
+          canon: "recovery email",
+          service: "",
+          secret,
+          exact: false,
+        };
+    }
+    const service = front.filter((w) => !ROLE_WORDS.has(w.toLowerCase())).join(" ");
+    return { label: tail, canon: tailWords.join(" ").toLowerCase(), service, secret, exact: false };
+  }
   return null;
 }
+
+/** Labels that fill the same field ("pass" and "password", "user" and "login"). */
+const FIELD_OF: Record<string, string> = Object.fromEntries(
+  (
+    [
+      ["password", ["password", "pass", "passwd", "pwd", "pw", "passcode", "passphrase"]],
+      ["user", ["user", "username", "username", "login", "userid", "id"]],
+      ["email", ["email", "e-mail", "mail", "emailaddress"]],
+      ["url", ["url", "website", "site", "link", "loginurl"]],
+    ] as const
+  ).flatMap(([field, labels]) => labels.map((l) => [norm(l), field])),
+);
+const fieldOf = (label: string) => FIELD_OF[label] ?? label;
+
+/** Whether a value can be what the label says: not a placeholder, not a sentence. */
+function plausible(l: Label, raw: string): boolean {
+  const v = unescapeMd(raw).trim();
+  if (!v || PLACEHOLDER.test(v) || v.includes("⟦")) return false;
+  if (!l.secret) return true;
+  const words = v.split(/\s+/).length;
+  // A passphrase can have a few words; prose ("Password: ask Sam for it") has more.
+  if (l.label === "pass" && !l.exact) return words === 1;
+  return words <= (l.exact ? 5 : 3);
+}
+
+// "Password: x", "- **Email**: x", "1. API key = x", "🔑 Gmail password – x"
+const LABEL_LINE =
+  /^\s*(?:[-*+]\s+|\d+[.)]\s+)?(?:\*\*|__)?([^\s:=*_][^:=*_]{0,44}?)(?:\*\*|__)?\s*(?::|=|\s[-–]\s)\s*(.+?)\s*$/u;
+
+type Found = Label & { raw: string };
+
+function labelOf(line: string): Found | null {
+  const m = line.match(LABEL_LINE);
+  if (!m) return null;
+  const l = classifyLabel(m[1]!);
+  if (!l) return null;
+  const raw = m[2]!.replace(/^(\*\*|__|`)+|(\*\*|__|`)+$/g, "").trim();
+  return plausible(l, raw) ? { ...l, raw } : null;
+}
+
+/**
+ * Why a line was not read as "label: value", as a reason code (diagnostics
+ * for real exports; never the text itself).
+ */
+export function whyNotLabel(line: string): { reason: string; label?: string } {
+  const m = line.match(LABEL_LINE);
+  if (!m) return { reason: "no label: value shape" };
+  const l = classifyLabel(m[1]!);
+  if (!l) return { reason: "label not known", label: m[1]! };
+  const raw = m[2]!.replace(/^(\*\*|__|`)+|(\*\*|__|`)+$/g, "").trim();
+  if (plausible(l, raw)) return { reason: "read" };
+  if (PLACEHOLDER.test(unescapeMd(raw).trim())) return { reason: "placeholder value" };
+  return { reason: `value of ${raw.split(/\s+/).length} words`, label: m[1]! };
+}
+
+// Where a second label starts on the same line: "User: a Password: b", "user: a | pass: b".
+const INLINE_SPLIT =
+  /\s*(?:\s\|\s|\s\/\s|;\s|\t)\s*|,?\s+(?=(?:[\p{L}\p{N}]+ ){0,2}(?:password|passwd|pass|pwd|pin|username|user|login|e-?mail|mail|url|api key|key|token|secret)\s*[:=])/iu;
+
+/** Every "label: value" on a line; several when one line holds a whole login. */
+function labelsOf(line: string): Found[] {
+  // A two-column table read top to bottom: "| Password | x |".
+  const kv = line.match(/^\s*\|\s*([^|]+?)\s*\|\s*((?:[^|\\]|\\.)+?)\s*\|\s*$/);
+  if (kv) {
+    const l = classifyLabel(kv[1]!);
+    return l && plausible(l, kv[2]!) ? [{ ...l, raw: kv[2]! }] : [];
+  }
+  const whole = labelOf(line);
+  const parts: string[] = [];
+  let carry = "";
+  // A split can fall inside a label ("Account | username: x"): words without a colon go on.
+  for (const p of line.split(INLINE_SPLIT).filter((x) => x?.trim())) {
+    if (/[:=]/.test(p)) {
+      parts.push(carry ? `${carry} ${p}` : p);
+      carry = "";
+    } else carry = carry ? `${carry} ${p}` : p;
+  }
+  if (carry) parts.push(carry);
+  if (parts.length > 1) {
+    const each = parts.map(labelOf);
+    // Only when every part is a label: otherwise the value itself had a " / " in it.
+    if (each.every(Boolean) && each.length > 1) return each as Found[];
+  }
+  return whole ? [whole] : [];
+}
+
+/** A label on its own line ("Password", "**Username:**"): its value is on the next line. */
+function loneLabel(line: string): Label | null {
+  const m = line.match(
+    /^\s*(?:[-*+]\s+)?(?:\*\*|__)?([^:=]{1,44}?)(?:\*\*|__)?\s*[:=]?\s*(?:\*\*|__)?\s*$/,
+  );
+  return m ? classifyLabel(m[1]!) : null;
+}
+
+/** Names that say nothing about which account it is. */
+const GENERIC_NAMES = new Set(
+  [
+    "password",
+    "passwords",
+    "login",
+    "logins",
+    "credentials",
+    "credential",
+    "account",
+    "accounts",
+    "access",
+    "details",
+    "info",
+    "keys",
+    "secrets",
+    "untitled",
+  ].map(norm),
+);
 
 const isHeading = (line: string) => /^\s*#{1,6}\s/.test(line);
 const headingText = (line: string) =>
@@ -163,6 +340,19 @@ function fitFields(
   return out;
 }
 
+/**
+ * The first name that says which account it is: the service written in the
+ * label, what smart fill found, the heading above, the site, the page.
+ * "Password" or "Credentials" alone is no name; the page title says more.
+ */
+function pickName(...candidates: (string | null | undefined)[]): string {
+  const ok = candidates
+    .map((c) => (c ?? "").replace(/[*_`#]/g, "").trim())
+    .filter((c) => c && c.length <= 80);
+  // All generic: the last one, the page title, still says where it came from.
+  return ok.find((c) => !GENERIC_NAMES.has(norm(c))) ?? ok.at(-1) ?? "Imported";
+}
+
 export function detectCredentials(
   lines: string[],
   ctx: { nodeKey: string; title: string; nextId: () => string },
@@ -170,8 +360,7 @@ export function detectCredentials(
   const found: Credential[] = [];
   const used = new Set<number>();
   let heading = ctx.title;
-  const nameFor = (fallback?: string) =>
-    (fallback && fallback.length <= 80 ? fallback : "") || heading || ctx.title || "Imported";
+  const nameFor = (fallback?: string) => pickName(fallback, heading, ctx.title);
 
   // 1. Code blocks holding a private key or a provider key.
   for (let i = 0; i < lines.length; i++) {
@@ -223,14 +412,16 @@ export function detectCredentials(
       continue;
     const header = cells(lines[i]!);
     const secretCols = header
-      .map((h, k) => (SECRET_LABELS.has(norm(h)) ? k : -1))
+      .map((h, k) => (classifyLabel(h)?.secret ? k : -1))
       .filter((k) => k >= 0);
     let j = i + 2;
     while (j < lines.length && /^\s*\|.*\|\s*$/.test(lines[j]!)) j++;
     if (secretCols.length) {
       for (let r = i + 2; r < j; r++) {
         const row = cells(lines[r]!);
-        const raws = secretCols.map((k) => row[k] ?? "").filter((v) => v && v !== "-");
+        const raws = secretCols
+          .map((k) => row[k] ?? "")
+          .filter((v) => v && !PLACEHOLDER.test(unescapeMd(v).trim()));
         if (!raws.length) continue;
         const obj = Object.fromEntries(header.map((h, k) => [h, unescapeMd(row[k] ?? "")]));
         const rec = parseGenericRows([obj])[0]!;
@@ -251,27 +442,55 @@ export function detectCredentials(
   }
 
   // 3. "Label: value" groups (blank lines allowed in between, as Notion writes one block per line).
-  let group: { line: number; label: string; raw: string; secret: boolean }[] = [];
+  let group: (Found & { line: number })[] = [];
   let groupHeading = heading;
   const flush = () => {
     const secrets = group.filter((g) => g.secret);
     if (secrets.length) {
-      const text = group.map((g) => `${g.label}: ${unescapeMd(g.raw)}`).join("\n");
+      const recovery = group.find((g) => g.label === "recoveryemail");
+      const text = group
+        .filter((g) => g !== recovery)
+        .map((g) => `${g.canon}: ${unescapeMd(g.raw)}`)
+        .join("\n");
       const fill = smartFill(text);
       const type = settle(fill.type, fill.values);
+      if (recovery) fill.values.recovery_email = unescapeMd(recovery.raw);
       const host = normalizeHost(fill.values.url ?? "");
+      const service = group.find((g) => g.service)?.service;
       found.push({
         id: ctx.nextId(),
         nodeKey: ctx.nodeKey,
         source: "text",
         type,
-        name: fill.name || groupHeading || host || ctx.title || "Imported",
+        name: pickName(service, fill.name, groupHeading, host, ctx.title),
         values: fitFields(type, fill.values, unescapeMd(secrets[0]!.raw)),
         spans: secrets.map((s) => ({ line: s.line, raw: s.raw })),
       });
       for (const g of group) used.add(g.line);
     }
     group = [];
+  };
+  const add = (l: Found, line: number) => {
+    if (!group.length) groupHeading = heading;
+    // A field seen again ("Username:", or "user:", for a second account), or
+    // another service ("Gmail user" after "Facebook password"), starts a new credential.
+    const service = group.find((g) => g.service)?.service;
+    if (
+      group.some((g) => fieldOf(g.label) === fieldOf(l.label)) ||
+      (l.service && service && norm(l.service) !== norm(service))
+    )
+      flush();
+    if (!group.length) groupHeading = heading;
+    group.push({ ...l, line });
+  };
+  // The value under a lone label: one token, maybe as a list item or a quote.
+  const loneValue = (s: string) => {
+    if (/^\s*(#|\||```|~~~)/.test(s) || labelOf(s) || loneLabel(s)) return null;
+    const v = s
+      .trim()
+      .replace(/^(?:[-*+]\s+|\d+[.)]\s+|>\s*)/, "")
+      .replace(/^(\*\*|__|`)+|(\*\*|__|`)+$/g, "");
+    return v && !/\s/.test(v) && v.length <= 200 ? v : null;
   };
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i]!;
@@ -285,16 +504,28 @@ export function detectCredentials(
       flush();
       continue;
     }
-    if (!line.trim()) continue;
-    const l = labelOf(line);
-    if (l) {
-      if (!group.length) groupHeading = heading;
-      // A label seen again ("Username:" for a second account) starts a new credential.
-      if (group.some((g) => g.label === l.label)) flush();
-      group.push({ line: i, ...l });
-    } else {
-      flush();
+    // Blank lines and a table's |---| line do not end a group.
+    if (!line.trim() || /^\s*\|[\s:|-]+\|\s*$/.test(line)) continue;
+    const ls = labelsOf(line);
+    if (ls.length) {
+      for (const l of ls) add(l, i);
+      continue;
     }
+    // "Password" on one line and the value alone on the next (blank lines allowed).
+    const lone = loneLabel(line);
+    if (lone) {
+      let j = i + 1;
+      while (j < lines.length && j <= i + 3 && !lines[j]!.trim()) j++;
+      const raw = j < lines.length && !used.has(j) ? loneValue(lines[j]!) : null;
+      if (raw) {
+        if (plausible(lone, raw)) {
+          add({ ...lone, raw }, j);
+          i = j;
+          continue;
+        }
+      }
+    }
+    flush();
   }
   flush();
 
@@ -322,7 +553,7 @@ export function detectCredentials(
 
 /** Database rows: a database is about credentials when a column is named like a secret. */
 export function secretColumnsOf(columns: string[]): string[] {
-  return columns.filter((c) => SECRET_LABELS.has(norm(c)));
+  return columns.filter((c) => classifyLabel(c)?.secret);
 }
 
 export function detectRowCredential(
@@ -330,7 +561,10 @@ export function detectRowCredential(
   columns: string[],
   ctx: { nodeKey: string; title: string; nextId: () => string },
 ): Credential | null {
-  const secretCols = secretColumnsOf(columns).filter((c) => (row[c] ?? "").trim());
+  const secretCols = secretColumnsOf(columns).filter((c) => {
+    const v = (row[c] ?? "").trim();
+    return v && !PLACEHOLDER.test(v);
+  });
   if (!secretCols.length) return null;
   const rec = parseGenericRows([row])[0]!;
   const type = settle(rec.type, rec.fields);
@@ -344,6 +578,26 @@ export function detectRowCredential(
     spans: [],
     secretColumns: secretCols,
   };
+}
+
+/**
+ * Two finds are the same credential when they hold the same secrets for the
+ * same account at the same place (the type may differ: a row and a page can
+ * read one login differently). Memory only: the key holds the secrets.
+ */
+export function dedupeKey(c: Credential): string {
+  const v = c.values;
+  const sensitive = new Set(
+    (getItemType(c.type)?.fields ?? []).filter((f) => f.sensitive).map((f) => f.key),
+  );
+  const secrets = Object.entries(v)
+    .filter(([k, x]) => sensitive.has(k) && x.trim())
+    .map(([, x]) => x.trim())
+    .sort();
+  const who = (v.username || v.email || v.account || "").trim().toLowerCase();
+  const where =
+    normalizeHost(v.url ?? v.base_url ?? "") ?? (v.host || v.hostname || "").trim().toLowerCase();
+  return JSON.stringify([where, who, secrets]);
 }
 
 /** What the preview shows: never the secret itself. */

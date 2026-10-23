@@ -151,4 +151,33 @@ describe("converting Notion pages", () => {
     expect(creds).toHaveLength(1);
     expect(json).not.toContain("html-Secret-9");
   });
+
+  it("reads line breaks inside a block as lines, in Markdown and HTML", () => {
+    const base = { key: "k", notionId: null, title: "Mail", kind: "page", parentKey: null };
+    const md = {
+      ...base,
+      dir: "",
+      children: [],
+      format: "md",
+      text: "# Mail\n\nUser: me@acme.test<br>Password: br-Secret-1\n\n| a<br>b | c |",
+    } as NotionNode;
+    const lines = markdownLines(md);
+    expect(lines).toContain("Password: br-Secret-1");
+    // Tables keep their <br>: a row is one line.
+    expect(lines).toContain("| a<br>b | c |");
+    const ctx = { nodeKey: "k", title: "Mail", nextId: () => "x" };
+    expect(detectCredentials(lines, ctx)[0]!.values).toMatchObject({
+      email: "me@acme.test",
+      password: "br-Secret-1",
+    });
+
+    const html = {
+      ...md,
+      format: "html",
+      text: '<div class="page-body"><p>User: me@acme.test<br>Password: <b>br-Secret-2</b></p></div>',
+    } as NotionNode;
+    const doc = htmlBodyDoc(html);
+    const h = htmlLines(doc);
+    expect(detectCredentials(h.lines, ctx)[0]!.values.password).toBe("br-Secret-2");
+  });
 });
