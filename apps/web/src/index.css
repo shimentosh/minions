@@ -607,7 +607,7 @@ input:-webkit-autofill:active {
     padding-inline-start: 0;
   }
 
-  .minions-prose .ProseMirror li[data-type="taskItem"] {
+  .minions-prose .ProseMirror ul[data-type="taskList"] > li {
     display: flex;
     align-items: flex-start;
     justify-content: flex-start;
@@ -618,7 +618,7 @@ input:-webkit-autofill:active {
 
   .minions-prose
     .ProseMirror
-    li[data-type="taskItem"]
+    ul[data-type="taskList"] > li
     > :is(label, .minions-task-item-checkbox) {
     margin-top: 0.15rem;
     display: inline-flex;
@@ -626,31 +626,31 @@ input:-webkit-autofill:active {
     cursor: pointer;
   }
 
-  .minions-prose .ProseMirror li[data-type="taskItem"] > div {
+  .minions-prose .ProseMirror ul[data-type="taskList"] > li > div {
     flex: 0 1 auto;
     min-width: 0;
     text-align: left;
   }
 
-  .minions-prose .ProseMirror li[data-type="taskItem"] > div > * {
+  .minions-prose .ProseMirror ul[data-type="taskList"] > li > div > * {
     margin-inline: 0;
   }
 
-  .minions-prose .ProseMirror li[data-type="taskItem"] ul,
-  .minions-prose .ProseMirror li[data-type="taskItem"] ol {
+  .minions-prose .ProseMirror ul[data-type="taskList"] > li ul,
+  .minions-prose .ProseMirror ul[data-type="taskList"] > li ol {
     margin-top: 0.2rem;
   }
 
-  .minions-prose .ProseMirror li[data-type="taskItem"] [data-slot="checkbox"] {
+  .minions-prose .ProseMirror ul[data-type="taskList"] > li [data-slot="checkbox"] {
     margin-top: 0;
   }
 
-  .minions-prose .ProseMirror li[data-type="taskItem"] > div p {
+  .minions-prose .ProseMirror ul[data-type="taskList"] > li > div p {
     margin: 0;
     line-height: 1.45;
   }
 
-  .minions-prose .ProseMirror li[data-type="taskItem"][data-checked="true"] > div p {
+  .minions-prose .ProseMirror ul[data-type="taskList"] > li[data-checked="true"] > div p {
     color: color-mix(in srgb, var(--foreground) 62%, transparent);
     text-decoration: line-through;
   }
@@ -746,6 +746,80 @@ input:-webkit-autofill:active {
     height: 0;
     pointer-events: none;
     color: var(--muted-foreground);
+  }
+
+  /* Pages: the block editor (components/pages/page-editor.tsx). */
+  .page-prose .ProseMirror {
+    font-size: 1rem;
+    min-height: 40vh;
+  }
+
+  /* Every empty block under the cursor hints at the slash menu, as in Notion. */
+  .page-prose .ProseMirror .is-empty::before {
+    content: attr(data-placeholder);
+    float: left;
+    height: 0;
+    pointer-events: none;
+    color: color-mix(in oklab, var(--muted-foreground) 70%, transparent);
+  }
+
+  .page-prose .ProseMirror .callout {
+    display: flex;
+    gap: 0.6rem;
+    margin: 0.75rem 0;
+    padding: 0.75rem 1rem;
+    border-radius: 0.5rem;
+    background: color-mix(in oklab, var(--muted) 70%, transparent);
+  }
+  .page-prose .ProseMirror .callout::before {
+    content: attr(data-icon);
+    flex-shrink: 0;
+    line-height: 1.6;
+  }
+  .page-prose .ProseMirror .callout > * {
+    min-width: 0;
+  }
+  .page-prose .ProseMirror .callout > :first-child {
+    margin-top: 0;
+  }
+
+  /* Toggles (Tiptap Details). */
+  .page-prose .ProseMirror [data-type="details"] {
+    display: flex;
+    gap: 0.25rem;
+    margin: 0.25rem 0;
+  }
+  .page-prose .ProseMirror [data-type="details"] > button {
+    flex-shrink: 0;
+    width: 1.5rem;
+    height: 1.6rem;
+    border-radius: 0.25rem;
+    color: var(--muted-foreground);
+  }
+  .page-prose .ProseMirror [data-type="details"] > button::before {
+    content: "▸";
+    display: inline-block;
+    transition: transform 0.15s;
+  }
+  .page-prose .ProseMirror [data-type="details"].is-open > button::before {
+    transform: rotate(90deg);
+  }
+  .page-prose .ProseMirror [data-type="details"] > button:hover {
+    background: var(--accent);
+  }
+  .page-prose .ProseMirror [data-type="details"] > div {
+    flex: 1;
+    min-width: 0;
+  }
+  .page-prose .ProseMirror [data-type="details"] summary {
+    list-style: none;
+    font-weight: 500;
+  }
+  .page-prose .ProseMirror [data-type="details"] summary::-webkit-details-marker {
+    display: none;
+  }
+  .page-prose .ProseMirror [data-type="details"]:not(.is-open) [data-type="detailsContent"] {
+    display: none;
   }
 }
 

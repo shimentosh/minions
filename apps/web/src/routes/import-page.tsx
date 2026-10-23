@@ -11,7 +11,8 @@ import {
   type VaultItemSummary,
 } from "@minions/core";
 import { useQueryClient } from "@tanstack/react-query";
-import { FileUp, Link2, ShieldCheck, TriangleAlert } from "lucide-react";
+import { Link } from "@tanstack/react-router";
+import { ChevronRight, FileArchive, FileUp, Link2, ShieldCheck, TriangleAlert } from "lucide-react";
 import { useMemo, useRef, useState } from "react";
 import { EmptyNote, Page, PageBody, Section } from "@/components/layout/page";
 import { SimpleSelect } from "@/components/simple-select";
@@ -225,6 +226,22 @@ export function ImportPage() {
         title="Import Center"
         subtitle="Bring in passwords and secrets from Notion, browsers, Bitwarden, CSV or JSON. Files are read on this device and encrypted before anything is sent."
       >
+        {!parsed && (
+          <Link
+            to="/import/notion"
+            className="flex items-center gap-3 rounded-xl border bg-card px-4 py-3 hover:bg-accent/40"
+          >
+            <FileArchive className="size-5 shrink-0 text-muted-foreground" />
+            <span className="min-w-0 flex-1">
+              <span className="block font-medium text-sm">Moving from Notion?</span>
+              <span className="block text-muted-foreground text-xs">
+                Import the whole workspace export (.zip): pages, databases and files become
+                encrypted pages, and passwords in them become vault items.
+              </span>
+            </span>
+            <ChevronRight className="size-4 text-muted-foreground" />
+          </Link>
+        )}
         {!parsed && (
           <Section title="Choose a file">
             <div className="flex flex-wrap items-end gap-3">
