@@ -41,9 +41,7 @@ const nav = async (path) => {
 const dialog = () => page.getByRole("dialog");
 const pasteInto = async (text) => {
   await page.evaluate((t) => navigator.clipboard.writeText(t), text);
-  await dialog()
-    .getByLabel("Paste anything")
-    .click();
+  await dialog().getByLabel("Paste anything").click();
   await page.keyboard.press("Control+V");
   await page.waitForTimeout(200);
 };

@@ -51,10 +51,7 @@ try {
     (t) => navigator.clipboard.writeText(t),
     "github.com  octo@example.com  Restore-Me-123!",
   );
-  await a.page
-    .getByRole("dialog")
-    .getByLabel("Paste anything")
-    .click();
+  await a.page.getByRole("dialog").getByLabel("Paste anything").click();
   await a.page.keyboard.press("Control+V");
   await a.page.getByRole("dialog").getByRole("button", { name: "Save", exact: true }).click();
   await a.page.waitForURL(/item=/);
