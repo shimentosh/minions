@@ -148,7 +148,7 @@ export class VaultService {
    * parameters are included so the master password alone restores it.
    */
   async exportEncrypted(ctx: AuthContext) {
-    const [keys, items, notes, projects, collections, tags, relations] = await Promise.all([
+    const [keys, items, notes, pages, projects, collections, tags, relations] = await Promise.all([
       this.keys(ctx),
       this.prisma.vaultItem.findMany({
         where: { vaultId: ctx.vaultId },
@@ -162,6 +162,25 @@ export class VaultService {
       this.prisma.note.findMany({
         where: { vaultId: ctx.vaultId },
         include: { tags: { include: { tag: true } } },
+      }),
+      // Pages: wrapped page keys and envelopes. Files are not included yet (they can be large).
+      this.prisma.page.findMany({
+        where: { vaultId: ctx.vaultId },
+        orderBy: [{ position: "asc" }, { id: "asc" }],
+        select: {
+          id: true,
+          parentId: true,
+          position: true,
+          kind: true,
+          protectedKey: true,
+          metaEnc: true,
+          contentEnc: true,
+          favorite: true,
+          archivedAt: true,
+          deletedAt: true,
+          createdAt: true,
+          updatedAt: true,
+        },
       }),
       this.prisma.project.findMany({ where: { vaultId: ctx.vaultId } }),
       this.prisma.collection.findMany({ where: { vaultId: ctx.vaultId } }),
@@ -198,6 +217,7 @@ export class VaultService {
         projectId: i.projectId,
         collectionId: i.collectionId,
         favorite: i.favorite,
+        archivedAt: i.archivedAt,
         metadata: i.metadata,
         tags: i.tags.map((t) => t.tag.name),
         usedByProjectIds: i.usedBy.map((u) => u.projectId),
@@ -234,6 +254,7 @@ export class VaultService {
         createdAt: n.createdAt,
         updatedAt: n.updatedAt,
       })),
+      pages,
       relations: relations.map(({ fromItemId, toItemId, kind }) => ({
         fromItemId,
         toItemId,

@@ -47,6 +47,8 @@ export class UpsertItemDto {
   @IsString({ each: true })
   @Length(1, 40, { each: true })
   tags?: string[];
+  /** Create archived (imports). Updates keep the current state; PATCH changes it. */
+  @IsOptional() @IsBoolean() archived?: boolean;
   @IsArray()
   @ArrayMaxSize(200)
   @ValidateNested({ each: true })
@@ -68,6 +70,7 @@ export class PatchItemDto {
   @Length(1, 40, { each: true })
   tags?: string[];
   @IsOptional() @IsString() @Length(1, 200) name?: string;
+  @IsOptional() @IsBoolean() archived?: boolean;
 }
 
 /** Moves, favourites or tags many items at once. Only plaintext organising columns change. */
@@ -82,6 +85,7 @@ export class BulkPatchItemsDto {
   @IsString({ each: true })
   @Length(1, 40, { each: true })
   addTags?: string[];
+  @IsOptional() @IsBoolean() archived?: boolean;
 }
 
 export class ListItemsQuery {
@@ -95,6 +99,8 @@ export class ListItemsQuery {
   @IsOptional() @IsString() @MaxLength(40) tag?: string;
   @IsOptional() @IsIn(["true", "false"]) favorite?: string;
   @IsOptional() @IsIn(["true", "false"]) trash?: string;
+  /** Archived items: left out (default), shown with the rest, or shown alone. */
+  @IsOptional() @IsIn(["exclude", "include", "only"]) archived?: string;
   @IsOptional() @IsIn(["updated", "name", "recent", "frequent", "created"]) sort?: string;
   @IsOptional() @IsUUID(4) cursor?: string;
   @IsOptional() @Type(() => Number) @IsInt() @Min(1) @Max(200) limit?: number;

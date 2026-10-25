@@ -1,5 +1,7 @@
 import type { VaultItemSummary } from "@minions/core";
 import {
+  Archive,
+  ArchiveRestore,
   FolderKanban,
   GripVertical,
   Layers,
@@ -17,7 +19,7 @@ import { ItemGlyph } from "@/lib/item-icons";
 import { useDeleteItem, useToggleFavorite } from "@/lib/queries";
 import { useSelection } from "@/lib/selection";
 import { toast } from "@/lib/toast";
-import { useDraggableItem, useMoveDialog } from "./organize";
+import { useArchiveItems, useDraggableItem, useMoveDialog } from "./organize";
 
 /** A small coloured label for the project or collection an item sits in. */
 export function GroupChip({
@@ -85,6 +87,7 @@ export function ItemMenu({ item }: { item: VaultItemSummary }) {
   const openMove = useMoveDialog((s) => s.open);
   const favorite = useToggleFavorite();
   const remove = useDeleteItem();
+  const archive = useArchiveItems();
   return (
     <Menu>
       <MenuTrigger
@@ -104,6 +107,10 @@ export function ItemMenu({ item }: { item: VaultItemSummary }) {
         </MenuItem>
         <MenuItem onClick={() => favorite.mutate({ id: item.id, favorite: !item.favorite })}>
           <Star /> {item.favorite ? "Remove from favorites" : "Add to favorites"}
+        </MenuItem>
+        <MenuItem onClick={() => archive([item], !item.archivedAt)}>
+          {item.archivedAt ? <ArchiveRestore /> : <Archive />}
+          {item.archivedAt ? "Unarchive" : "Archive"}
         </MenuItem>
         <MenuSeparator />
         <MenuItem
@@ -196,6 +203,9 @@ export function ItemRow({
             <span className="shrink-0 rounded bg-destructive/8 px-1 font-medium text-[10px] text-destructive-foreground">
               PROD
             </span>
+          )}
+          {item.archivedAt && (
+            <Archive className="size-3 shrink-0 text-muted-foreground" aria-label="Archived" />
           )}
         </span>
         <span className="mt-0.5 flex min-w-0 items-center gap-1.5">

@@ -15,6 +15,7 @@ import {
   X,
 } from "lucide-react";
 import { type ReactNode, useState } from "react";
+import { PageTreeSection } from "@/components/pages/page-tree";
 import { Collapsible, CollapsiblePanel, CollapsibleTrigger } from "@/components/ui/collapsible";
 import {
   Sidebar,
@@ -373,6 +374,8 @@ export function AppSidebar() {
                 ))}
               </SidebarMenu>
             </SidebarGroup>
+            <div className="mx-4 my-1 h-px bg-sidebar-border/70" />
+            <PageTreeSection />
             <div className="mx-4 my-1 h-px bg-sidebar-border/70" />
             <DropGroup
               label="Projects"

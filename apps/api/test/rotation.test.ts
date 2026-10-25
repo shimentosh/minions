@@ -278,7 +278,7 @@ describe("vault key rotation", () => {
     expect(Buffer.from(newKey).equals(Buffer.from(fresh))).toBe(true);
 
     const status = (await again.agent.get("/vault/rotation").expect(200)).body;
-    expect(status.remaining).toEqual({ items: 1, notes: 1 });
+    expect(status.remaining).toEqual({ items: 1, notes: 1, pages: 0 });
     // Re-sending an already moved item is a harmless no-op.
     expect(await moveItems(again.agent, oldKey, newKey)).toBe(1);
     await moveNotes(again.agent, oldKey, newKey);

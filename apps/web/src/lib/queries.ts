@@ -28,6 +28,8 @@ export interface ItemFilters {
   tag?: string;
   favorite?: boolean;
   trash?: boolean;
+  /** Archived items: left out by default, shown with the rest, or shown alone. */
+  archived?: "include" | "only";
   sort?: "updated" | "name" | "recent" | "frequent" | "created";
 }
 
@@ -184,6 +186,8 @@ export function useInvalidateVault() {
       qc.invalidateQueries({ queryKey: ["ws"] }),
       qc.invalidateQueries({ queryKey: ["shared"] }),
       qc.invalidateQueries({ queryKey: ["people"] }),
+      // Restores and key changes touch pages too.
+      qc.invalidateQueries({ queryKey: ["pages"] }),
     ]);
 }
 
@@ -217,6 +221,7 @@ export interface BulkPatch {
   projectId?: string | null;
   collectionId?: string | null;
   addTags?: string[];
+  archived?: boolean;
 }
 
 /** Organises many items at once. Only plaintext metadata changes; nothing is re-encrypted. */

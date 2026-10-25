@@ -55,6 +55,21 @@ and organizes it the way you work: by project, by collection and by tag.
 - **Version history** for every change, kept encrypted.
 - **Relationships:** link a domain or server to the login it uses instead of copying the password.
 
+### Pages (Notion-style, new)
+- **Pages inside pages**, in a sidebar tree you can drag to reorder and nest, with favorites,
+  trash and history.
+- **Block editor:** headings, lists, to-dos, toggles, quotes, callouts, code, tables, images
+  and files, with a `/` menu, links between pages and links to vault items.
+- **Encrypted end to end, titles included.** Search runs on your device.
+- **Import from Notion:** drop the workspace export (.zip, Markdown & CSV or HTML). The page
+  tree, databases, images and files come across, and passwords and API keys found in your
+  pages become proper vault items (one per account, however often it was written down),
+  with a link left in the page. You review everything before anything is sent, and what is
+  imported is archived (and tagged `notion-import`) until you want it.
+- **Archive** any page or vault item, one at a time or many at once. Archived things stay
+  out of the sidebar, lists and search until you turn on "Show archived".
+- Plan and roadmap: [docs/NOTION_ALTERNATIVE_PLAN.md](docs/NOTION_ALTERNATIVE_PLAN.md).
+
 ### Security
 - **End-to-end encryption** with Argon2id and AES-256-GCM ([details below](#how-the-encryption-works)).
 - **Security Center:** weak, reused, old and expired passwords, accounts without 2FA,
@@ -78,8 +93,8 @@ and organizes it the way you work: by project, by collection and by tag.
   sites, offers to save new logins, shows every 2FA code live, and includes item details,
   favorites and a password generator. Site matching is phishing-resistant.
 - **Desktop app** (Tauri 2) with a Windows installer.
-- **Import** from Bitwarden (CSV/JSON), Chrome, Edge, Firefox, Notion (CSV export) and
-  generic CSV/JSON, with a preview and duplicate detection.
+- **Import** from Bitwarden (CSV/JSON), Chrome, Edge, Firefox, Notion (a whole workspace
+  export, or a CSV) and generic CSV/JSON, with a preview and duplicate detection.
 - **Encrypted backups** that only your master password can open, and restore.
 - **Optional AI organizing** (DeepSeek) suggests projects, collections and tags from names
   and websites only. Secrets and financial items are never sent. Off unless you add an API key.
@@ -198,9 +213,17 @@ pnpm --filter @minions/core test     # crypto, TOTP vectors, detection, classifi
 pnpm --filter @minions/api test      # integration tests against minions_test (created automatically)
 pnpm typecheck
 pnpm lint
+pnpm --filter @minions/web test      # page tree, Notion import (parsing, credentials, conversion)
 node tests/e2e/smoke.mjs             # needs `pnpm dev` running
+node tests/e2e/pages.mjs             # pages, editor, lock/unlock, Notion import, archive
 pnpm --filter @minions/extension build && node tests/e2e/extension.mjs
 ```
+
+To check the importer against your own Notion export without it leaving the machine,
+`NOTION_EXPORT=/path/to/export.zip pnpm --filter @minions/web exec vitest run export-stats`
+runs the read, detect and convert steps and prints aggregate counts only (pages, depth,
+databases, credentials by type, duplicates, what looked secret but was not taken),
+never page text or secrets.
 
 What is built, what is still open, and guides for team workspaces and the operator
 dashboard: [docs/STATUS.md](docs/STATUS.md).

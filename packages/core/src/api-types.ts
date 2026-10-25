@@ -146,6 +146,8 @@ export interface VaultItemSummary {
   createdAt: string;
   updatedAt: string;
   deletedAt: string | null;
+  /** Archived items are hidden from lists and search unless asked for. */
+  archivedAt?: string | null;
   /** Personal items: how many people it is shared with (pending invitations included). */
   sharedWith?: number;
 }
@@ -195,6 +197,8 @@ export interface UpsertItemRequest {
   collectionId?: string | null;
   favorite?: boolean;
   tags?: string[];
+  /** Create the item archived (imports). Ignored on update; use PATCH. */
+  archived?: boolean;
   fields: ItemField[];
   signals?: SecretSignals;
   usedByProjectIds?: string[];
@@ -206,6 +210,8 @@ export interface Page<T> {
   items: T[];
   nextCursor: string | null;
   total?: number;
+  /** Item lists: how many archived items the same filters left out. */
+  hiddenArchived?: number;
 }
 
 export interface ItemVersion {
@@ -234,6 +240,108 @@ export interface NoteSummary {
 
 export interface NoteDetail extends NoteSummary {
   contentEnc: string | null;
+}
+
+// ─── Pages (docs/NOTION_ALTERNATIVE_PLAN.md) ─────────────────────────────────
+//
+// Everything a person wrote is ciphertext: protectedKey is the page key wrapped
+// by the vault key (pageAad.key); metaEnc and contentEnc are under the page key.
+
+export type PageKind = "page" | "database";
+
+/** One page in the tree. Cheap: the client loads every one after unlock. */
+export interface PageNode {
+  id: string;
+  parentId: string | null;
+  /** Fractional-index key ordering siblings. */
+  position: string;
+  kind: PageKind;
+  protectedKey: string;
+  /** {title, icon?, props?} as JSON, encrypted (pageAad.meta). */
+  metaEnc: string;
+  favorite: boolean;
+  /** Archived pages are hidden from the tree and search unless asked for. */
+  archivedAt: string | null;
+  revision: number;
+  createdAt: string;
+  updatedAt: string;
+  deletedAt: string | null;
+}
+
+export interface PageDetail extends PageNode {
+  /** {v, doc} as JSON, encrypted (pageAad.content). Null for an empty page. */
+  contentEnc: string | null;
+}
+
+export interface CreatePageRequest {
+  id: string;
+  parentId: string | null;
+  position: string;
+  kind: PageKind;
+  protectedKey: string;
+  metaEnc: string;
+  contentEnc?: string | null;
+  favorite?: boolean;
+  /** Imports create their pages archived. */
+  archived?: boolean;
+}
+
+export interface UpdatePageRequest {
+  metaEnc: string;
+  contentEnc: string | null;
+  /** Optimistic concurrency: the revision the edit was based on. */
+  revision?: number;
+}
+
+export interface MovePageRequest {
+  parentId?: string | null;
+  position?: string;
+  favorite?: boolean;
+}
+
+export interface PageVersion {
+  id: string;
+  revision: number;
+  metaEnc: string;
+  contentEnc: string | null;
+  createdAt: string;
+}
+
+/** Decrypted page meta. */
+export interface PageMeta {
+  title: string;
+  icon?: string;
+  /** Database rows: property id → value. */
+  props?: Record<string, PagePropValue>;
+  /** Where the page came from ({from: "notion", at}). Encrypted with the rest of the meta. */
+  imported?: { from: string; at: string };
+}
+
+export type PagePropValue = string | number | boolean | string[] | null;
+
+/** Decrypted content of a database page: its schema. */
+export interface DatabaseSchema {
+  properties: DatabaseProperty[];
+}
+
+export interface DatabaseProperty {
+  id: string;
+  name: string;
+  type:
+    | "title"
+    | "text"
+    | "number"
+    | "select"
+    | "multi_select"
+    | "date"
+    | "checkbox"
+    | "url"
+    | "email"
+    | "phone"
+    | "person"
+    | "relation"
+    | "files";
+  options?: string[];
 }
 
 export type FindingType =

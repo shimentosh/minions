@@ -164,6 +164,36 @@ describe("starting over from a reset link", () => {
       },
     });
     await withKeyPair(user);
+    const pageId = randomUUID();
+    const childId = randomUUID();
+    for (const [id, parentId] of [
+      [pageId, null],
+      [childId, pageId],
+    ] as const)
+      await prisma.page.create({
+        data: {
+          id,
+          vaultId: user.vaultId,
+          parentId,
+          position: "a0",
+          protectedKey: "pk",
+          metaEnc: "meta",
+          contentEnc: "content",
+        },
+      });
+    await prisma.pageVersion.create({
+      data: { pageId, revision: 1, metaEnc: "meta", contentEnc: "content" },
+    });
+    await prisma.pageFile.create({
+      data: {
+        id: randomUUID(),
+        pageId: childId,
+        vaultId: user.vaultId,
+        metaEnc: "meta",
+        size: 1,
+        data: Buffer.from([1]),
+      },
+    });
 
     const token = await resetToken(user.email);
     const { res, agent, vaultId } = await complete(user, token);
@@ -183,6 +213,11 @@ describe("starting over from a reset link", () => {
     expect(await prisma.vault.findUnique({ where: { id: user.vaultId } })).toBeNull();
     expect(await prisma.vaultItem.count({ where: { id: body.id } })).toBe(0);
     expect(await prisma.share.count({ where: { userId: user.userId } })).toBe(0);
+    // Pages, their history and attachments went with the old vault.
+    expect((await agent.get("/pages").expect(200)).body.pages).toHaveLength(0);
+    expect(await prisma.page.count({ where: { vaultId: user.vaultId } })).toBe(0);
+    expect(await prisma.pageVersion.count({ where: { pageId } })).toBe(0);
+    expect(await prisma.pageFile.count({ where: { vaultId: user.vaultId } })).toBe(0);
 
     // The old password no longer signs in; the new one does.
     expect((await login(app, user)).res.status).toBe(401);

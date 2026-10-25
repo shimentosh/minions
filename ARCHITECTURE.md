@@ -48,6 +48,12 @@ field     AES-256-GCM(vaultKey, value, AAD = "item:<id>:<fieldKey>")      vault_
 note body AES-256-GCM(vaultKey, html,  AAD = "note:<id>:content")         notes.content_enc
 fingerprintKey = HKDF(vaultKey, "minions/fingerprint")
   password fingerprint = HMAC-SHA256(fingerprintKey, password)            reuse detection only
+
+pageKey   (random 256-bit, one per page)
+          stored as AES-GCM(vaultKey, pageKey, AAD = "vault:<vid>:page:<id>:key")  pages.protected_key
+page meta    AES-GCM(pageKey, {title, icon, props}, AAD = "page:<id>:meta")      pages.meta_enc
+page content AES-GCM(pageKey, {v, doc|schema},    AAD = "page:<id>:content")    pages.content_enc
+page file    0x01 ‖ iv ‖ AES-GCM(pageKey, bytes,  AAD = "page:<id>:file:<fid>") page_files.data
 ```
 
 * Envelope format: `v1.<base64 iv>.<base64 ciphertext+tag>`. The server rejects a
@@ -74,6 +80,11 @@ Card items expose only the last 4 digits and brand.
 Everything else (passwords, keys, secrets, card numbers, CVV, account numbers,
 TOTP secrets, recovery codes, private keys, connection strings, note bodies) is
 ciphertext.
+
+**Pages are stricter** (§10): their titles, icons, content, database schemas and
+property values, and file names, types and bytes are all ciphertext. The server
+sees only the tree's shape (parent ids), sibling order keys, page or database,
+the favorite flag, times, revisions and sizes.
 
 ## 2. Authentication vs vault unlock
 
@@ -133,7 +144,8 @@ recover/complete(email, proof, [code], new authKey, kdf, re-wrapped user key, de
 users, vaults, recovery_codes, webauthn_credentials (pending integration),
 devices, sessions, projects, collections, tags, vault_items, vault_item_fields,
 vault_item_versions, vault_item_tags, vault_item_relations, item_project_links,
-notes, note_versions, note_tags, activity_logs, security_events,
+notes, note_versions, note_tags, pages, page_versions, page_files,
+activity_logs, security_events,
 security_finding_states, ai_classifications, user_classification_preferences,
 import_jobs, import_items.
 
@@ -143,8 +155,8 @@ database enum, so a new type is a registry entry plus UI, with no migration.
 ## 4. API modules
 
 auth, users, vault, vault-items, projects, collections, tags, relations, notes,
-activity, security, devices, sessions, imports, ai, common (prisma, guards,
-throttling, server crypto, request context).
+pages, activity, security, devices, sessions, imports, ai, common (prisma,
+guards, throttling, server crypto, request context).
 
 Password generation, TOTP code generation, import parsing and quick-capture
 secret extraction run on the client, because the server must never see the values.
@@ -167,6 +179,10 @@ Corrections update `user_classification_preferences`.
 Server-side search runs over safe metadata only (`search_text` + pg_trgm GIN
 index, joined with project/collection/tag names). Ciphertext is never searched.
 Note titles are searchable; note bodies are encrypted and are not.
+
+Page titles are encrypted too, so page search runs on the device: the client
+loads the whole tree after unlock (one request), decrypts every title in memory
+and filters it there. Nothing decrypted is persisted.
 
 ## 7. Workspaces and sharing
 
@@ -244,3 +260,63 @@ devices, plus a list of accounts (email, name, joined, last active, counts). It 
 no item names, hosts, IPs or ciphertext. Access requires the account's id in
 `OPERATOR_USER_IDS` (ids, because email ownership is never verified), an unlocked vault and, outside development, two-factor; everyone
 else gets 404. Each view is recorded in the operator's activity log.
+
+## 10. Pages (Notion-style)
+
+Plan and roadmap: [docs/NOTION_ALTERNATIVE_PLAN.md](docs/NOTION_ALTERNATIVE_PLAN.md).
+API `apps/api/src/pages`, client `apps/web/src/lib/pages`, importer `apps/web/src/lib/notion`.
+
+- **A key per page.** Each page has a random key wrapped by the vault key
+  (`pageAad.key`). Title, icon and database row properties (`meta_enc`), the editor
+  document or database schema (`content_enc`) and files (`page_files`) are under it,
+  with AAD naming the page and file, so nothing can be swapped between pages. The
+  server refuses anything that is not an envelope (`PLAINTEXT_SECRET`) or, for files,
+  an encrypted blob.
+- **Tree.** `pages.parent_id` (same vault, checked), `position` (fractional index),
+  `kind` (`page` or `database`; a database's rows are its child pages). Moves are
+  refused if they would make a cycle. Deleting stamps a page and every live
+  descendant with one `deleted_at`; restoring brings back exactly that group (a page
+  whose parent is still in the trash comes back at the top level); purging deletes the
+  sub-tree with its versions and files.
+- **Content.** ProseMirror JSON in the editor schema (`lib/pages/schema.ts`: Tiptap
+  StarterKit, to-dos, tables, toggles, callouts, encrypted images and files, page
+  links by id, vault-item chips). Images and files have no `src`: the client fetches
+  ciphertext, decrypts it and shows a `blob:` URL, so a page cannot make the browser
+  load anything remote. Saves are revision-checked; a version is kept at most every
+  10 minutes.
+- **Rotation and backup.** Vault-key rotation re-wraps page keys (batch kind
+  `pages`); `finish` refuses while any page is left. The encrypted export includes
+  pages; restore re-wraps their keys (and re-encrypts for a fresh id when restoring
+  into another account). Files are not in backups yet.
+- **Files.** `PUT /pages/:id/files/:fileId` takes raw ciphertext
+  (`application/octet-stream`, 25 MiB plus header; nginx allows 26 MB on that route
+  only) with the encrypted `{name, type}` in `X-Minions-File-Meta`. Stored in
+  PostgreSQL `bytea`.
+- **Archive.** Pages and vault items have a plaintext `archived_at` (like `favorite`,
+  an organising flag). Archiving a page archives everything under it; unarchiving
+  brings back the page, everything under it and the pages above it
+  (`POST /pages/archive`). The tree carries `archivedAt` and the client hides archived
+  pages and their sub-pages from the sidebar and page search; item lists and the
+  palette leave archived items out unless `?archived=include|only`, and say how many
+  they hid. One "Show archived" switch per device (`lib/archive.ts`, a yes/no in
+  `localStorage`). Autofill, opening an item and the Security Center still see
+  archived items. Backups keep the state.
+- **Notion import** runs on the device: zip.js reads the export in place (parts and
+  nested zips too), Markdown/HTML go through DOMPurify and the editor schema,
+  databases come from the CSV (or the HTML table), and credentials found in pages,
+  tables, code blocks and credential databases become vault items through `/imports`,
+  leaving a chip in the page. Sub-page folders are matched by `<Title> <id>`, or by
+  title or id alone as newer exports write them; CSV rows pair with row pages by
+  title, loosely when file names lost characters. Credential labels may name a
+  service ("Gmail password") or a role ("Admin password"), share a line, sit above
+  their value or fill a two-column table. The same secret for the same account found
+  twice becomes one item (`dedupeKey`), which every page links to; item notes record
+  the Notion path. By default everything created is archived: pages with
+  `{from: "notion", at}` in their encrypted meta, items tagged `notion-import`. Pages
+  are written parents-first in batches of up to 100 (`POST /pages/batch`,
+  idempotent), files one at a time; both retry through rate limits. Nothing is sent
+  before the person confirms the preview. `src/lib/notion/export-stats.test.ts` runs
+  the import's read and convert steps on a real export (`NOTION_EXPORT=…`) and prints
+  aggregate counts only.
+- **Not yet:** pages in team workspaces and sharing a page (phase 3), full-text search
+  of content (phase 2).

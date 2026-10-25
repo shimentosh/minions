@@ -21,6 +21,7 @@ import {
 } from "@/components/ui/command";
 import { Kbd, KbdGroup } from "@/components/ui/kbd";
 import { get } from "@/lib/api";
+import { useShowArchived } from "@/lib/archive";
 import { ItemGlyph } from "@/lib/item-icons";
 import { useSession } from "@/lib/session";
 import { useUi } from "@/lib/ui-store";
@@ -72,13 +73,16 @@ export function CommandPalette() {
   }, [open]);
 
   // Server-side search over safe metadata; recent items when the query is empty.
+  // Archived items only when the person chose to show them.
+  const showArchived = useShowArchived((s) => s.show);
   const { data } = useQuery({
-    queryKey: ["palette", debounced],
+    queryKey: ["palette", debounced, showArchived],
     enabled: open,
     queryFn: () =>
       get<Page<VaultItemSummary>>("/vault/items", {
         q: debounced || undefined,
         sort: debounced ? "updated" : "recent",
+        archived: showArchived ? "include" : undefined,
         limit: 8,
       }),
     placeholderData: (prev) => prev,

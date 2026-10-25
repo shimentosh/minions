@@ -1,6 +1,15 @@
 import { CATEGORY_LABELS, type ItemCategory } from "@minions/core";
 import { useNavigate, useSearch } from "@tanstack/react-router";
-import { KeyRound, Plus, Rows3, SearchIcon, Table as TableIcon, X } from "lucide-react";
+import {
+  Eye,
+  EyeOff,
+  KeyRound,
+  Plus,
+  Rows3,
+  SearchIcon,
+  Table as TableIcon,
+  X,
+} from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Page } from "@/components/layout/page";
 import { SimpleSelect } from "@/components/simple-select";
@@ -18,6 +27,7 @@ import { ItemDetail } from "@/components/vault/item-detail";
 import { ItemRow } from "@/components/vault/item-row";
 import { ItemTable } from "@/components/vault/item-table";
 import { BulkBar } from "@/components/vault/organize";
+import { useShowArchived } from "@/lib/archive";
 import { cn } from "@/lib/cn";
 import { timeAgo } from "@/lib/format";
 import { type ItemFilters, useCollections, useItems, useProjects } from "@/lib/queries";
@@ -32,6 +42,8 @@ export interface VaultSearch {
   tag?: string;
   favorite?: boolean;
   trash?: boolean;
+  /** Only archived items. */
+  archived?: boolean;
   sort?: ItemFilters["sort"];
   item?: string;
 }
@@ -81,6 +93,8 @@ export function VaultPage() {
     return () => window.clearTimeout(t);
   }, [q, search.q, navigate]);
 
+  const showArchived = useShowArchived((s) => s.show);
+  const setShowArchived = useShowArchived((s) => s.setShow);
   const filters: ItemFilters = {
     q: search.q,
     category: search.category,
@@ -89,11 +103,13 @@ export function VaultPage() {
     tag: search.tag,
     favorite: search.favorite,
     trash: search.trash,
+    archived: search.archived ? "only" : showArchived ? "include" : undefined,
     sort: search.sort,
   };
   const { data, isLoading, fetchNextPage, hasNextPage, isFetchingNextPage } = useItems(filters);
   const items = useMemo(() => data?.pages.flatMap((p) => p.items) ?? [], [data]);
   const total = data?.pages[0]?.total;
+  const hiddenArchived = data?.pages[0]?.hiddenArchived ?? 0;
   const selection = useSelection();
 
   // A new list starts with nothing ticked.
@@ -103,17 +119,19 @@ export function VaultPage() {
 
   const title = search.trash
     ? "Trash"
-    : search.favorite
-      ? "Favorites"
-      : search.category
-        ? CATEGORY_LABELS[search.category]
-        : search.collectionId
-          ? (collections?.find((c) => c.id === search.collectionId)?.name ?? "Collection")
-          : search.projectId
-            ? (projects?.find((p) => p.id === search.projectId)?.name ?? "Project")
-            : search.tag
-              ? `#${search.tag}`
-              : "All items";
+    : search.archived
+      ? "Archived"
+      : search.favorite
+        ? "Favorites"
+        : search.category
+          ? CATEGORY_LABELS[search.category]
+          : search.collectionId
+            ? (collections?.find((c) => c.id === search.collectionId)?.name ?? "Collection")
+            : search.projectId
+              ? (projects?.find((p) => p.id === search.projectId)?.name ?? "Project")
+              : search.tag
+                ? `#${search.tag}`
+                : "All items";
 
   const filterLabel = search.tag ? { kind: "Tag", name: `#${search.tag}` } : null;
 
@@ -178,6 +196,17 @@ export function VaultPage() {
   const count = (
     <span className="flex shrink-0 items-center gap-2 text-muted-foreground text-xs">
       {total !== undefined ? `${total} item${total === 1 ? "" : "s"}` : " "}
+      {!search.trash && !search.archived && (hiddenArchived > 0 || showArchived) && (
+        <button
+          type="button"
+          aria-pressed={showArchived}
+          className="flex items-center gap-1 rounded px-1 text-foreground/70 hover:bg-accent hover:text-foreground"
+          onClick={() => setShowArchived(!showArchived)}
+        >
+          {showArchived ? <EyeOff className="size-3" /> : <Eye className="size-3" />}
+          {showArchived ? "Hide archived" : `Show ${hiddenArchived} archived`}
+        </button>
+      )}
       {view === "list" && items.length > 0 && (
         <button
           type="button"
@@ -282,15 +311,35 @@ export function VaultPage() {
           <KeyRound />
         </EmptyMedia>
         <EmptyTitle>
-          {search.q ? "No matches" : search.trash ? "Trash is empty" : "Nothing here yet"}
+          {search.q
+            ? "No matches"
+            : search.trash
+              ? "Trash is empty"
+              : search.archived
+                ? "Nothing is archived"
+                : "Nothing here yet"}
         </EmptyTitle>
         <EmptyDescription>
           {search.q
             ? "Search looks at names, sites, usernames, providers, projects and tags."
-            : "Save a login, an API key or anything else you need to keep safe."}
+            : search.archived
+              ? "Archived items stay out of lists and search. Items from a Notion import land here."
+              : "Save a login, an API key or anything else you need to keep safe."}
+          {hiddenArchived > 0 && (
+            <>
+              {" "}
+              <button
+                type="button"
+                className="underline underline-offset-2"
+                onClick={() => setShowArchived(true)}
+              >
+                Show {hiddenArchived} archived
+              </button>
+            </>
+          )}
         </EmptyDescription>
       </EmptyHeader>
-      {!search.trash && (
+      {!search.trash && !search.archived && (
         <Button size="sm" onClick={() => openEditor({})}>
           <Plus /> New item
         </Button>

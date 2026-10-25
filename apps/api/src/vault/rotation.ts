@@ -59,7 +59,7 @@ class StartRotationDto {
 }
 
 class BatchQuery {
-  @IsIn(["items", "notes"]) kind!: "items" | "notes";
+  @IsIn(["items", "notes", "pages"]) kind!: "items" | "notes" | "pages";
   @IsOptional() @Type(() => Number) @IsInt() @Min(1) @Max(BATCH_MAX) limit?: number;
 }
 
@@ -113,6 +113,12 @@ class RotatedNoteDto {
   versions!: NoteVersionDto[];
 }
 
+/** A page keeps its content under its own key: only that key is re-wrapped. */
+class RotatedPageDto {
+  @IsUUID(4) id!: string;
+  @Matches(ENVELOPE) @MaxLength(200) protectedKey!: string;
+}
+
 class SubmitBatchDto {
   @IsOptional()
   @IsArray()
@@ -126,6 +132,12 @@ class SubmitBatchDto {
   @ValidateNested({ each: true })
   @Type(() => RotatedNoteDto)
   notes?: RotatedNoteDto[];
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(BATCH_MAX)
+  @ValidateNested({ each: true })
+  @Type(() => RotatedPageDto)
+  pages?: RotatedPageDto[];
 }
 
 type VersionField = { key: string; value: string; sensitive: boolean };
@@ -149,11 +161,12 @@ export class RotationService {
   }
 
   private async remaining(vaultId: string, target: number) {
-    const [items, notes] = await Promise.all([
+    const [items, notes, pages] = await Promise.all([
       this.prisma.vaultItem.count({ where: { vaultId, keyGen: { lt: target } } }),
       this.prisma.note.count({ where: { vaultId, keyGen: { lt: target } } }),
+      this.prisma.page.count({ where: { vaultId, keyGen: { lt: target } } }),
     ]);
-    return { items, notes };
+    return { items, notes, pages };
   }
 
   async status(ctx: AuthContext) {
@@ -165,7 +178,7 @@ export class RotationService {
       pendingProtectedVaultKey: vault.pendingProtectedKey,
       remaining: pending
         ? await this.remaining(vault.id, vault.keyGen + 1)
-        : { items: 0, notes: 0 },
+        : { items: 0, notes: 0, pages: 0 },
     };
   }
 
@@ -236,6 +249,15 @@ export class RotationService {
           })),
         })),
       };
+    }
+    if (q.kind === "pages") {
+      const pages = await this.prisma.page.findMany({
+        where,
+        orderBy: { id: "asc" },
+        take,
+        select: { id: true, protectedKey: true },
+      });
+      return { pages };
     }
     const rows = await this.prisma.note.findMany({
       where,
@@ -380,6 +402,20 @@ export class RotationService {
       if (moved) done++;
       else skipped++;
     }
+    for (const page of dto.pages ?? []) {
+      const row = await this.prisma.page.findFirst({
+        where: { id: page.id, vaultId: vault.id },
+        select: { keyGen: true },
+      });
+      if (!row) throw new BadRequestException("Unknown page");
+      // Conditional on the old generation: a retried batch does nothing.
+      const r = await this.prisma.page.updateMany({
+        where: { id: page.id, vaultId: vault.id, keyGen: { lt: target } },
+        data: { keyGen: target, protectedKey: page.protectedKey },
+      });
+      if (r.count === 1) done++;
+      else skipped++;
+    }
     return { done, skipped, remaining: await this.remaining(vault.id, target) };
   }
 
@@ -387,7 +423,7 @@ export class RotationService {
   async finish(ctx: AuthContext) {
     const vault = await this.requirePending(ctx);
     const left = await this.remaining(vault.id, vault.keyGen + 1);
-    if (left.items || left.notes)
+    if (left.items || left.notes || left.pages)
       throw new ConflictException({
         message: "Some items are still under the old key",
         code: "ROTATION_INCOMPLETE",

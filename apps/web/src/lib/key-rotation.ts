@@ -5,6 +5,7 @@ import {
   encryptString,
   getItemType,
   keyAad,
+  pageAad,
   secretFingerprint,
   unwrapKey,
   wipe,
@@ -42,9 +43,14 @@ interface NoteRow {
   versions: { id: string; contentEnc: string | null }[];
 }
 
+interface PageRow {
+  id: string;
+  protectedKey: string;
+}
+
 interface Status {
   inProgress: boolean;
-  remaining: { items: number; notes: number };
+  remaining: { items: number; notes: number; pages: number };
 }
 
 type Key = Uint8Array<ArrayBuffer>;
@@ -141,6 +147,25 @@ async function rotateNote(oldKey: Key, newKey: Key, row: NoteRow) {
   return { id: row.id, contentEnc: await body(row.contentEnc), versions };
 }
 
+/** A page keeps its own key: only the wrapper moves to the new vault key. */
+async function rotatePage(oldKey: Key, newKey: Key, row: PageRow) {
+  const vaultId = useSession.getState().me?.vaultId;
+  if (!vaultId) throw new Error("Vault is locked");
+  const context = pageAad.key(vaultId, row.id);
+  let pageKey: Key;
+  try {
+    pageKey = await unwrapKey(oldKey, row.protectedKey, context);
+  } catch (e) {
+    if (!(e instanceof DecryptionError)) throw e;
+    pageKey = await unwrapKey(newKey, row.protectedKey, context);
+  }
+  try {
+    return { id: row.id, protectedKey: await wrapKey(newKey, pageKey, context) };
+  } finally {
+    wipe(pageKey);
+  }
+}
+
 /** Moves every remaining row to the new key, then has the server swap the wrapped key. */
 export async function runRotation(
   oldKey: Key,
@@ -149,17 +174,17 @@ export async function runRotation(
 ): Promise<void> {
   const status = await get<Status>("/vault/rotation");
   if (!status.inProgress) return;
-  const total = status.remaining.items + status.remaining.notes;
+  const total = status.remaining.items + status.remaining.notes + (status.remaining.pages ?? 0);
   let done = 0;
   onProgress?.({ done, total });
 
-  for (const kind of ["items", "notes"] as const) {
+  for (const kind of ["items", "notes", "pages"] as const) {
     for (;;) {
-      const page = await get<{ items?: ItemRow[]; notes?: NoteRow[] }>("/vault/rotation/batch", {
-        kind,
-        limit: kind === "items" ? 50 : 10,
-      });
-      const rows = (kind === "items" ? page.items : page.notes) ?? [];
+      const page = await get<{ items?: ItemRow[]; notes?: NoteRow[]; pages?: PageRow[] }>(
+        "/vault/rotation/batch",
+        { kind, limit: kind === "notes" ? 10 : kind === "pages" ? 100 : 50 },
+      );
+      const rows = page[kind] ?? [];
       if (!rows.length) break;
       let pending: unknown[] = [];
       let bytes = 0;
@@ -175,7 +200,9 @@ export async function runRotation(
         const next =
           kind === "items"
             ? await rotateItem(oldKey, newKey, row as ItemRow)
-            : await rotateNote(oldKey, newKey, row as NoteRow);
+            : kind === "notes"
+              ? await rotateNote(oldKey, newKey, row as NoteRow)
+              : await rotatePage(oldKey, newKey, row as PageRow);
         const size = JSON.stringify(next).length;
         if (bytes + size > FLUSH_BYTES) await flush();
         pending.push(next);

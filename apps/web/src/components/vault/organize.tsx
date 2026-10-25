@@ -11,7 +11,19 @@ import {
   useSensors,
 } from "@dnd-kit/core";
 import type { VaultItemSummary } from "@minions/core";
-import { Check, FolderKanban, Layers, Plus, SearchIcon, Star, Tag, Trash2, X } from "lucide-react";
+import {
+  Archive,
+  ArchiveRestore,
+  Check,
+  FolderKanban,
+  Layers,
+  Plus,
+  SearchIcon,
+  Star,
+  Tag,
+  Trash2,
+  X,
+} from "lucide-react";
 import { type ReactNode, useState } from "react";
 import { create } from "zustand";
 import { NewGroupDialog } from "@/components/layout/new-group-dialog";
@@ -26,6 +38,7 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { errorMessage } from "@/lib/api";
+import { useShowArchived } from "@/lib/archive";
 import { ItemGlyph } from "@/lib/item-icons";
 import { useCollections, useDeleteItem, usePatchItems, useProjects } from "@/lib/queries";
 import { useSelection } from "@/lib/selection";
@@ -72,6 +85,37 @@ export function useMoveItems() {
             () => {
               for (const [from, ids] of origins) patch.mutate({ ids, [field(target.kind)]: from });
             },
+          );
+        },
+        onError: (e) => toast.error(errorMessage(e)),
+      },
+    );
+  };
+}
+
+/**
+ * Archives items or brings them back, then offers Undo. Archived items leave
+ * lists and search; autofill and the Security Center still see them.
+ */
+export function useArchiveItems() {
+  const patch = usePatchItems();
+  const clear = useSelection((s) => s.clear);
+  const show = useShowArchived((s) => s.show);
+  return (items: VaultItemSummary[], archived: boolean) => {
+    const ids = items.map((i) => i.id);
+    if (!ids.length) return;
+    patch.mutate(
+      { ids, archived },
+      {
+        onSuccess: () => {
+          clear();
+          const what = items.length === 1 ? `"${items[0]!.name}"` : `${items.length} items`;
+          toastWithAction(
+            archived
+              ? `Archived ${what}${show ? "" : ". Hidden from lists"}`
+              : `Brought back ${what}`,
+            "Undo",
+            () => patch.mutate({ ids, archived: !archived }),
           );
         },
         onError: (e) => toast.error(errorMessage(e)),
@@ -279,12 +323,14 @@ export function BulkBar({ items, trash }: { items: VaultItemSummary[]; trash?: b
   const openMove = useMoveDialog((s) => s.open);
   const patch = usePatchItems();
   const remove = useDeleteItem();
+  const archive = useArchiveItems();
   const [tagging, setTagging] = useState(false);
   const [tag, setTag] = useState("");
   const selected = items.filter((i) => ids.has(i.id));
   if (!selected.length) return null;
 
   const allFavorite = selected.every((i) => i.favorite);
+  const allArchived = selected.every((i) => i.archivedAt);
   const done = (msg: string) => {
     toast.success(msg);
     clear();
@@ -363,6 +409,10 @@ export function BulkBar({ items, trash }: { items: VaultItemSummary[]; trash?: b
             >
               <Star className={allFavorite ? "fill-amber-400 text-amber-400" : ""} />
               {allFavorite ? "Unfavorite" : "Favorite"}
+            </Button>
+            <Button size="sm" variant="ghost" onClick={() => archive(selected, !allArchived)}>
+              {allArchived ? <ArchiveRestore /> : <Archive />}
+              {allArchived ? "Unarchive" : "Archive"}
             </Button>
             <Button
               size="sm"

@@ -36,6 +36,7 @@ import { DevicesPage } from "@/routes/devices-page";
 import { GeneratorPage } from "@/routes/generator-page";
 import type { NotesSearch } from "@/routes/notes-page";
 import { OperatorPage } from "@/routes/operator-page";
+import type { PagesSearch } from "@/routes/pages-page";
 import { ProjectPage, ProjectsPage } from "@/routes/projects-page";
 import { PublicSharePage } from "@/routes/public-share-page";
 import { SecurityPage } from "@/routes/security-page";
@@ -52,6 +53,12 @@ import { WorkspacesPage } from "@/routes/workspaces-page";
 const NotesPage = lazyRouteComponent(() => import("@/routes/notes-page"), "NotesPage");
 const ImportPage = lazyRouteComponent(() => import("@/routes/import-page"), "ImportPage");
 const SettingsPage = lazyRouteComponent(() => import("@/routes/settings-page"), "SettingsPage");
+const PagesHome = lazyRouteComponent(() => import("@/routes/pages-page"), "PagesHome");
+const PageRoute = lazyRouteComponent(() => import("@/routes/pages-page"), "PageRoute");
+const NotionImportPage = lazyRouteComponent(
+  () => import("@/routes/notion-import-page"),
+  "NotionImportPage",
+);
 
 function readSidebarDefault() {
   try {
@@ -161,6 +168,7 @@ const routes = [
       tag: str(s.tag),
       favorite: bool(s.favorite),
       trash: bool(s.trash),
+      archived: bool(s.archived),
       sort: str(s.sort) as VaultSearch["sort"],
       item: str(s.item),
     }),
@@ -178,6 +186,15 @@ const routes = [
       note: str(s.note),
     }),
   }),
+  createRoute({
+    getParentRoute: () => rootRoute,
+    path: "/pages",
+    component: PagesHome,
+    validateSearch: (s: Record<string, unknown>): PagesSearch => ({
+      view: s.view === "trash" || s.view === "archived" ? s.view : undefined,
+    }),
+  }),
+  createRoute({ getParentRoute: () => rootRoute, path: "/pages/$pageId", component: PageRoute }),
   createRoute({ getParentRoute: () => rootRoute, path: "/projects", component: ProjectsPage }),
   createRoute({
     getParentRoute: () => rootRoute,
@@ -210,6 +227,11 @@ const routes = [
   createRoute({ getParentRoute: () => rootRoute, path: "/devices", component: DevicesPage }),
   createRoute({ getParentRoute: () => rootRoute, path: "/generator", component: GeneratorPage }),
   createRoute({ getParentRoute: () => rootRoute, path: "/import", component: ImportPage }),
+  createRoute({
+    getParentRoute: () => rootRoute,
+    path: "/import/notion",
+    component: NotionImportPage,
+  }),
   createRoute({ getParentRoute: () => rootRoute, path: "/cleanup", component: CleanupPage }),
   createRoute({
     getParentRoute: () => rootRoute,

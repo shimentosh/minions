@@ -102,6 +102,7 @@ export function toSummary(i: ItemWithSummary): VaultItemSummary {
     createdAt: i.createdAt.toISOString(),
     updatedAt: i.updatedAt.toISOString(),
     deletedAt: i.deletedAt?.toISOString() ?? null,
+    archivedAt: i.archivedAt?.toISOString() ?? null,
     ...(i._count?.peopleShares !== undefined ? { sharedWith: i._count.peopleShares } : {}),
   };
 }
@@ -291,6 +292,7 @@ export class ItemsService {
           projectId: dto.projectId ?? null,
           collectionId: dto.collectionId ?? null,
           favorite: dto.favorite ?? false,
+          archivedAt: dto.archived ? new Date() : null,
           ...derived,
           passwordStrength: hasPassword ? (dto.signals?.passwordStrength ?? null) : null,
           passwordFingerprint: hasPassword ? (dto.signals?.passwordFingerprint ?? null) : null,
@@ -439,6 +441,9 @@ export class ItemsService {
           ...(dto.favorite !== undefined ? { favorite: dto.favorite } : {}),
           ...(dto.projectId !== undefined ? { projectId: dto.projectId } : {}),
           ...(dto.collectionId !== undefined ? { collectionId: dto.collectionId } : {}),
+          ...(dto.archived !== undefined
+            ? { archivedAt: dto.archived ? (existing.archivedAt ?? new Date()) : null }
+            : {}),
           ...(name
             ? {
                 name,
@@ -478,7 +483,22 @@ export class ItemsService {
           ...(dto.collectionId !== undefined ? { collectionId: dto.collectionId } : {}),
         },
       });
+      if (dto.archived === true)
+        // Items archived earlier keep their date.
+        await tx.vaultItem.updateMany({
+          where: { id: { in: ids }, vaultId: auth.vaultId, archivedAt: null },
+          data: { archivedAt: new Date() },
+        });
+      if (dto.archived === false)
+        await tx.vaultItem.updateMany({
+          where: { id: { in: ids }, vaultId: auth.vaultId },
+          data: { archivedAt: null },
+        });
     });
+    if (dto.archived !== undefined)
+      await this.activity.log(auth, dto.archived ? "items.archived" : "items.unarchived", {
+        metadata: { count: ids.length },
+      });
     await this.findings.markDirty(auth.vaultId);
     return { updated: ids.length };
   }
@@ -567,6 +587,10 @@ export class ItemsService {
     const where: Prisma.VaultItemWhereInput = {
       vaultId: auth.vaultId,
       deletedAt: q.trash === "true" ? { not: null } : null,
+      // Archived items stay out of lists and search unless asked for (the trash shows everything).
+      ...(q.trash === "true" || q.archived === "include"
+        ? {}
+        : { archivedAt: q.archived === "only" ? { not: null } : null }),
       ...(types ? { type: { in: types } } : {}),
       ...(q.projectId
         ? { OR: [{ projectId: q.projectId }, { usedBy: { some: { projectId: q.projectId } } }] }
@@ -586,7 +610,8 @@ export class ItemsService {
             : q.sort === "created"
               ? [{ createdAt: "desc" }, { id: "asc" }]
               : [{ updatedAt: "desc" }, { id: "asc" }];
-    const [rows, total] = await Promise.all([
+    const hiding = q.trash !== "true" && (q.archived ?? "exclude") === "exclude";
+    const [rows, total, hiddenArchived] = await Promise.all([
       this.prisma.vaultItem.findMany({
         where,
         orderBy,
@@ -595,12 +620,17 @@ export class ItemsService {
         include: scope ? SUMMARY_INCLUDE : PERSONAL_INCLUDE,
       }),
       q.cursor ? Promise.resolve(undefined) : this.prisma.vaultItem.count({ where }),
+      // So the list can say "12 archived items hidden" for the same filters.
+      q.cursor || !hiding
+        ? Promise.resolve(undefined)
+        : this.prisma.vaultItem.count({ where: { ...where, archivedAt: { not: null } } }),
     ]);
     const page = rows.slice(0, limit);
     return {
       items: page.map(toSummary),
       nextCursor: rows.length > limit ? page[page.length - 1]!.id : null,
       total,
+      ...(hiddenArchived !== undefined ? { hiddenArchived } : {}),
     };
   }
 

@@ -268,7 +268,8 @@ export class SecurityService {
       collection: { select: { id: true, name: true, color: true } },
       tags: { select: { tag: { select: { name: true } } } },
     };
-    const base = { vaultId: auth.vaultId, deletedAt: null };
+    // Archived items stay off the dashboard; the Security Center still checks them.
+    const base = { vaultId: auth.vaultId, deletedAt: null, archivedAt: null };
     const unusedBefore = new Date(Date.now() - UNUSED_DAYS * DAY);
     const [
       created,
