@@ -59,6 +59,10 @@ const browser = await chromium.launch();
 const context = await browser.newContext({ viewport: { width: 1440, height: 900 } });
 const page = await context.newPage();
 page.on("pageerror", (e) => errors.push(`pageerror: ${e.message}`));
+// One person typing must never conflict with their own earlier save.
+page.on("response", (r) => {
+  if (r.status() === 409 && /\/pages\//.test(r.url())) errors.push(`409 from ${r.url()}`);
+});
 page.on("console", (m) => {
   if (m.type() === "error" && !/Failed to load resource/.test(m.text()))
     errors.push(`console: ${m.text()}`);
@@ -131,6 +135,50 @@ try {
   const box = await editor().locator('ul[data-type="taskList"] > li').first().boundingBox();
   if (!box || box.height > 40) throw new Error("to-do checkbox and text are not on one line");
 
+  step("favorite: the star fills and the page is in the sidebar at once");
+  await page.getByRole("button", { name: "Add to favorites" }).click();
+  await page.getByRole("button", { name: "Remove from favorites" }).waitFor({ timeout: 1000 });
+  const sidebar = page.locator('[data-sidebar="sidebar"]').first();
+  await sidebar.getByText("Favorites", { exact: true }).waitFor({ timeout: 1000 });
+  await sidebar
+    .getByRole("button", { name: "Remove Engineering handbook from favorites" })
+    .waitFor({ state: "attached" });
+  await shot("pages-01b-favorite");
+
+  step("⌘K finds a page by words in its content");
+  await page.keyboard.press(process.platform === "darwin" ? "Meta+k" : "Control+k");
+  await page.keyboard.type("friday");
+  const hit = page.getByRole("option", { name: /Engineering handbook/ });
+  await hit.waitFor({ timeout: 10_000 });
+  if ((await hit.locator("mark").innerText()) !== "Friday")
+    throw new Error("the palette does not highlight the match");
+  await shot("pages-01c-palette-search");
+  await page.keyboard.press("Escape");
+
+  step("Pages search finds content too, with a snippet");
+  await nav("/pages");
+  await page.getByPlaceholder("Search page titles and content…").fill("deploy friday");
+  await page.locator("mark", { hasText: "deploy" }).first().waitFor({ timeout: 10_000 });
+  await page.getByText("on Friday.").first().waitFor();
+  await page.getByPlaceholder("Search page titles and content…").fill("nothing like this");
+  await page.getByText("No page matches.").waitFor();
+
+  step("unfavorite from the sidebar");
+  await sidebar.getByText("Engineering handbook").first().hover();
+  await sidebar.getByRole("button", { name: "Remove Engineering handbook from favorites" }).click();
+  await sidebar.getByText("Favorites", { exact: true }).waitFor({ state: "detached" });
+
+  step("move a sub-page to the top level without dragging");
+  // The innermost row: its parent's <li> holds "Untitled" too.
+  const subRow = sidebar.locator("li", { hasText: "Untitled" }).last();
+  await subRow.hover();
+  await subRow.getByRole("button", { name: "Page actions" }).click();
+  await page.getByRole("menuitem", { name: "Move to…" }).click();
+  await page.getByRole("button", { name: "Top level" }).click();
+  await page.getByText("Moved to the top level").waitFor();
+  await nav(new URL(rootUrl).pathname);
+  await page.getByText("Pages inside").waitFor({ state: "detached" });
+
   step("lock, unlock: everything decrypts again");
   await page.getByRole("button", { name: "Lock vault" }).first().click();
   await page.getByText("Vault locked").waitFor();
@@ -199,13 +247,13 @@ try {
 
   step("imported pages are archived; unarchiving the import brings it back");
   await nav("/pages");
-  await page.getByPlaceholder("Search page titles…").fill("Team Wiki");
-  await page.getByText("No page title matches.").waitFor();
+  await page.getByPlaceholder("Search page titles and content…").fill("Team Wiki");
+  await page.getByText("No page matches.").waitFor();
   await nav("/pages?view=archived");
   await page.getByRole("checkbox", { name: "Select Notion" }).check();
   await page.getByRole("button", { name: /Unarchive 1 page/ }).click();
   await nav("/pages");
-  await page.getByPlaceholder("Search page titles…").fill("Team Wiki");
+  await page.getByPlaceholder("Search page titles and content…").fill("Team Wiki");
   await page
     .getByRole("link", { name: /Team Wiki/ })
     .first()

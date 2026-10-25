@@ -13,3 +13,8 @@ export const usePagesIndex = () => usePagesStore((s) => s.index);
 export const setPagesIndex = (index: PageIndex | null) => usePagesStore.setState({ index });
 
 onVaultClosed(() => setPagesIndex(null));
+
+/** Which page the "Move to…" dialog is open for. */
+export const useMovePage = create<{ pageId: string | null }>(() => ({ pageId: null }));
+export const openMovePage = (pageId: string) => useMovePage.setState({ pageId });
+onVaultClosed(() => useMovePage.setState({ pageId: null }));

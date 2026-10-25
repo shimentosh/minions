@@ -1,10 +1,11 @@
 import type { PageDetail, PageKind, PageMeta, PageNode, PageVersion } from "@minions/core";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { type QueryClient, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useMemo } from "react";
 import { setPagesIndex } from "@/components/pages/pages-context";
-import { del, get, patch, post, put } from "../api";
+import { del, errorMessage, get, patch, post, put } from "../api";
 import { useShowArchived } from "../archive";
-import { useSession } from "../session";
+import { onVaultClosed, useSession } from "../session";
+import { toast } from "../toast";
 import {
   buildNewPage,
   decryptContent,
@@ -22,18 +23,23 @@ import { archivedSet, indexPages, type PageEntry, type PageIndex, positionAtEnd 
  * need the server to read anything.
  */
 
+/** Decrypted meta by page, reused while its ciphertext is unchanged. Memory only. */
+const metas = new Map<string, { metaEnc: string; meta: PageMeta | null }>();
+onVaultClosed(() => metas.clear());
+
 async function decryptNodes(nodes: PageNode[]): Promise<PageEntry[]> {
   const out: PageEntry[] = [];
   // Small chunks keep the tab responsive while thousands of titles decrypt.
   for (let i = 0; i < nodes.length; i += 200) {
     const chunk = await Promise.all(
       nodes.slice(i, i + 200).map(async (n) => {
-        try {
-          const meta = await decryptMeta(n);
-          return { ...n, title: meta.title ?? "", icon: meta.icon, props: meta.props };
-        } catch {
-          return { ...n, title: "🔒 Can't decrypt" };
+        let meta = metas.get(n.id)?.metaEnc === n.metaEnc ? metas.get(n.id)!.meta : undefined;
+        if (meta === undefined) {
+          meta = await decryptMeta(n).catch(() => null);
+          metas.set(n.id, { metaEnc: n.metaEnc, meta });
         }
+        if (!meta) return { ...n, title: "🔒 Can't decrypt" };
+        return { ...n, title: meta.title ?? "", icon: meta.icon, props: meta.props };
       }),
     );
     out.push(...chunk);
@@ -122,8 +128,13 @@ export async function savePage(
   });
 }
 
+/** Stable for the life of the query client, so it is safe in effect dependencies. */
 export function usePageActions() {
   const qc = useQueryClient();
+  return useMemo(() => pageActions(qc), [qc]);
+}
+
+function pageActions(qc: QueryClient) {
   const refresh = () => qc.invalidateQueries({ queryKey: [...PAGES_KEY, "tree"] });
   const index = (): PageIndex =>
     indexPages(qc.getQueryData<PageEntry[]>([...PAGES_KEY, "tree", "active"]) ?? []);
@@ -152,9 +163,27 @@ export function usePageActions() {
       await patch(`/pages/${id}`, to);
       await refresh();
     },
+    /** Shows the change at once (star, sidebar), then saves it; undone if saving fails. */
     async favorite(id: string, favorite: boolean) {
-      await patch(`/pages/${id}`, { favorite });
-      await refresh();
+      const key = [...PAGES_KEY, "tree", "active"];
+      const set = (on: boolean) =>
+        qc.setQueryData<PageEntry[]>(key, (old) =>
+          old?.map((p) => (p.id === id ? { ...p, favorite: on } : p)),
+        );
+      // A tree request already in flight would bring the old flag back.
+      await qc.cancelQueries({ queryKey: key });
+      set(favorite);
+      try {
+        await patch(`/pages/${id}`, { favorite });
+        void refresh();
+        toast.success(
+          favorite ? "Added to favorites" : "Removed from favorites",
+          favorite ? "It's at the top of the sidebar." : undefined,
+        );
+      } catch (e) {
+        set(!favorite);
+        toast.error("Couldn't change favorites", errorMessage(e));
+      }
     },
     /** Archives pages with what is under them, or brings them back (with the pages above). */
     async archive(ids: string[], archived: boolean) {

@@ -115,12 +115,30 @@ try {
     window.history.pushState({}, "", "/pages");
     window.dispatchEvent(new PopStateEvent("popstate"));
   });
-  await page.getByPlaceholder("Search page titles…").fill("Page 7.3");
+  // Imports arrive archived: include them.
+  const showArchived = page.getByLabel(/Show archived pages/);
+  await showArchived.waitFor({ timeout: 60_000 });
+  await showArchived.check();
+  await page.getByPlaceholder("Search page titles and content…").fill("Page 7.3");
   await page
     .getByRole("link", { name: /Page 7\.3/ })
     .first()
     .waitFor({ timeout: 60_000 });
   console.log(`title search over every page: ${Date.now() - t} ms`);
+
+  // Words only page bodies have.
+  t = Date.now();
+  await page.getByPlaceholder("Search page titles and content…").fill("italic follow");
+  await page.getByText(/^\d+ found$/).waitFor({ timeout: 600_000 });
+  const first = Date.now() - t;
+  await page
+    .getByText(/reading page contents on this device/)
+    .waitFor({ state: "detached", timeout: 600_000 });
+  console.log(
+    `content search: first results ${first} ms, every page read and indexed ${Date.now() - t} ms`,
+  );
+  const heapAfter = await page.evaluate(() => performance.memory?.usedJSHeapSize ?? 0);
+  if (heapAfter) console.log(`tab JS heap with the index: ${(heapAfter / 1e6).toFixed(0)} MB`);
 } catch (e) {
   await page.screenshot({ path: join(tmpdir(), "notion-bench-failure.png") }).catch(() => {});
   console.error(e);

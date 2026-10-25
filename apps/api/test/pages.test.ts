@@ -162,6 +162,56 @@ describe("pages", () => {
       .expect(400);
   });
 
+  it("hands out encrypted bodies for the search index, owner's live pages only", async () => {
+    const alice = await registerUser(app);
+    const bob = await registerUser(app);
+    const a = await create(alice, "A", { body: "deploy notes" });
+    const empty = await create(alice, "Empty");
+    const trashed = await create(alice, "Trashed", { body: "gone" });
+    await alice.agent.delete(`/pages/${trashed.id}`).expect(204);
+
+    const res = (
+      await alice.agent
+        .post("/pages/contents")
+        .send({ ids: [a.id, empty.id, trashed.id, randomUUID()] })
+        .expect(200)
+    ).body;
+    expect(res.rest).toEqual([]);
+    expect(res.pages.map((p: { id: string }) => p.id).sort()).toEqual([a.id, empty.id].sort());
+    const body = res.pages.find((p: { id: string }) => p.id === a.id);
+    expect(body.revision).toBe(1);
+    expect(body.contentEnc).not.toContain("deploy");
+    const text = await decryptString(a.pageKey, body.contentEnc, pageAad.content(a.id));
+    expect(text).toContain("deploy notes");
+
+    // Someone else's ids return nothing.
+    const other = (
+      await bob.agent
+        .post("/pages/contents")
+        .send({ ids: [a.id] })
+        .expect(200)
+    ).body;
+    expect(other).toEqual({ pages: [], rest: [] });
+    await alice.agent.post("/pages/contents").send({ ids: [] }).expect(400);
+    await alice.agent
+      .post("/pages/contents")
+      .send({ ids: ["nope"] })
+      .expect(400);
+
+    // Large bodies are split over several requests, at least one page each time.
+    const big = "x".repeat(1_350_000);
+    const bigs = [];
+    for (const t of ["B1", "B2", "B3"]) bigs.push(await create(alice, t, { body: big }));
+    const first = (
+      await alice.agent
+        .post("/pages/contents")
+        .send({ ids: bigs.map((b) => b.id) })
+        .expect(200)
+    ).body;
+    expect(first.pages).toHaveLength(2);
+    expect(first.rest).toEqual([bigs[2]!.id]);
+  });
+
   it("moves pages without ever making a cycle", async () => {
     const alice = await registerUser(app);
     const a = await create(alice, "A");

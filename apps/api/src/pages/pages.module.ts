@@ -1,6 +1,7 @@
 import {
   isEncryptedBlob,
   isEnvelope,
+  type PageContentsResponse,
   type PageDetail,
   type PageNode,
   type PageVersion,
@@ -51,7 +52,13 @@ import { Auth, type AuthContext } from "../common/auth-context";
 import { VaultUnlockedGuard } from "../common/guards";
 import { PrismaService } from "../common/prisma.service";
 import type { Prisma } from "../generated/prisma/client";
-import { PAGE_BATCH_MAX, PAGE_CONTENT_MAX, PAGE_FILE_MAX_BYTES } from "./limits";
+import {
+  PAGE_BATCH_MAX,
+  PAGE_CONTENT_MAX,
+  PAGE_CONTENTS_BUDGET,
+  PAGE_CONTENTS_MAX_IDS,
+  PAGE_FILE_MAX_BYTES,
+} from "./limits";
 
 /**
  * Notion-style pages (docs/NOTION_ALTERNATIVE_PLAN.md). The server stores a
@@ -103,6 +110,14 @@ class MovePageDto {
 class ArchivePagesDto {
   @IsArray() @ArrayMinSize(1) @ArrayMaxSize(500) @IsUUID(4, { each: true }) ids!: string[];
   @IsBoolean() archived!: boolean;
+}
+
+class ContentsDto {
+  @IsArray()
+  @ArrayMinSize(1)
+  @ArrayMaxSize(PAGE_CONTENTS_MAX_IDS)
+  @IsUUID(4, { each: true })
+  ids!: string[];
 }
 
 class TreeQuery {
@@ -220,6 +235,35 @@ export class PagesService {
     });
     if (!page) throw new NotFoundException();
     return { ...node(page), contentEnc: page.contentEnc };
+  }
+
+  /**
+   * Encrypted bodies of live pages, for the client's search index. Stays under
+   * a byte budget (always at least one page); what did not fit comes back in
+   * `rest`. Unknown or trashed ids are left out.
+   */
+  async contents(auth: AuthContext, dto: ContentsDto): Promise<PageContentsResponse> {
+    const ids = [...new Set(dto.ids)];
+    const rows = await this.prisma.page.findMany({
+      where: { id: { in: ids }, vaultId: auth.vaultId, deletedAt: null },
+      select: { id: true, revision: true, contentEnc: true },
+    });
+    const byId = new Map(rows.map((r) => [r.id, r]));
+    const pages: PageContentsResponse["pages"] = [];
+    const rest: string[] = [];
+    let size = 0;
+    for (const id of ids) {
+      const row = byId.get(id);
+      if (!row) continue;
+      const len = row.contentEnc?.length ?? 0;
+      if (pages.length && size + len > PAGE_CONTENTS_BUDGET) {
+        rest.push(id);
+        continue;
+      }
+      size += len;
+      pages.push(row);
+    }
+    return { pages, rest };
   }
 
   async create(auth: AuthContext, dto: CreatePageDto): Promise<PageDetail> {
@@ -542,6 +586,11 @@ export class PagesController {
   @HttpCode(200)
   createMany(@Auth() a: AuthContext, @Body() dto: BatchCreateDto) {
     return this.pages.createMany(a, dto);
+  }
+  @Post("contents")
+  @HttpCode(200)
+  contents(@Auth() a: AuthContext, @Body() dto: ContentsDto) {
+    return this.pages.contents(a, dto);
   }
   @Post("archive")
   @HttpCode(200)

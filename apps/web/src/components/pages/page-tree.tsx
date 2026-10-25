@@ -3,6 +3,7 @@ import {
   Archive,
   ArchiveRestore,
   ChevronRight,
+  CornerUpRight,
   Eye,
   EyeOff,
   FileText,
@@ -13,7 +14,7 @@ import {
   Table2,
   Trash2,
 } from "lucide-react";
-import { type DragEvent, type ReactNode, useEffect, useState } from "react";
+import { type DragEvent, type ReactNode, useEffect, useMemo, useState } from "react";
 import { create } from "zustand";
 import { Collapsible, CollapsiblePanel, CollapsibleTrigger } from "@/components/ui/collapsible";
 import { Menu, MenuItem, MenuPopup, MenuSeparator, MenuTrigger } from "@/components/ui/menu";
@@ -32,7 +33,8 @@ import {
   positionBetween,
 } from "@/lib/pages/tree";
 import { onVaultClosed } from "@/lib/session";
-import { toast } from "@/lib/toast";
+import { toast, toastWithAction } from "@/lib/toast";
+import { openMovePage } from "./pages-context";
 
 /** Which pages are expanded. Memory only: page ids are not kept in browser storage. */
 const useExpanded = create<{ open: Set<string>; toggle: (id: string, on?: boolean) => void }>(
@@ -84,6 +86,26 @@ export async function toggleArchive(
   } catch (e) {
     toast.error(errorMessage(e));
   }
+}
+
+/** Moves a page and its sub-pages to the trash, with Undo. Resolves true once it is there. */
+export async function trashPage(
+  actions: ReturnType<typeof usePageActions>,
+  id: string,
+): Promise<boolean> {
+  try {
+    await actions.trash(id);
+  } catch (e) {
+    toast.error(errorMessage(e));
+    return false;
+  }
+  toastWithAction("Moved to trash", "Undo", () =>
+    actions.restore(id).then(
+      () => toast.success("Page restored"),
+      (e) => toast.error(errorMessage(e)),
+    ),
+  );
+  return true;
 }
 
 function TreeRow({
@@ -226,6 +248,9 @@ function TreeRow({
                 {page.favorite ? <StarOff /> : <Star />}
                 {page.favorite ? "Remove from favorites" : "Add to favorites"}
               </MenuItem>
+              <MenuItem onClick={() => openMovePage(page.id)}>
+                <CornerUpRight /> Move to…
+              </MenuItem>
               <MenuItem onClick={() => void toggleArchive(actions, [page.id], !isArchived)}>
                 {isArchived ? <ArchiveRestore /> : <Archive />}
                 {isArchived ? "Unarchive" : "Archive"}
@@ -234,14 +259,10 @@ function TreeRow({
               <MenuItem
                 variant="destructive"
                 onClick={() =>
-                  void actions.trash(page.id).then(
-                    () => {
-                      toast.success("Moved to trash", "Sub-pages went with it.");
-                      if (activeId && isWithin(index, activeId, page.id))
-                        void navigate({ to: "/pages" });
-                    },
-                    (e) => toast.error(errorMessage(e)),
-                  )
+                  void trashPage(actions, page.id).then((done) => {
+                    if (done && activeId && isWithin(index, activeId, page.id))
+                      void navigate({ to: "/pages" });
+                  })
                 }
               >
                 <Trash2 /> Move to trash
@@ -298,6 +319,7 @@ export function PageTreeSection() {
   const toggle = useExpanded((s) => s.toggle);
   const actions = usePageActions();
   const navigate = useNavigate();
+  const { isMobile, setOpenMobile } = useSidebar();
   const [open, setOpen] = useState(true);
 
   // Opening a page (link, search, import) reveals it in the tree.
@@ -307,7 +329,13 @@ export function PageTreeSection() {
   }, [activeId, index, toggle]);
 
   const top = childrenOf(index, null);
-  const favorites = (pages ?? []).filter((p) => p.favorite);
+  const favorites = useMemo(
+    () =>
+      (pages ?? [])
+        .filter((p) => p.favorite)
+        .sort((a, b) => pageTitle(a).localeCompare(pageTitle(b))),
+    [pages],
+  );
 
   const addTop = async () => {
     try {
@@ -326,18 +354,31 @@ export function PageTreeSection() {
             <SectionLabel>Favorites</SectionLabel>
             <ul className="mb-1">
               {favorites.map((p) => (
-                <li key={p.id}>
+                <li
+                  key={p.id}
+                  className={cn(
+                    "group/fav flex h-8 items-center rounded-md pe-1 text-sm hover:bg-sidebar-accent",
+                    activeId === p.id && "bg-sidebar-accent font-medium",
+                  )}
+                >
                   <Link
                     to="/pages/$pageId"
                     params={{ pageId: p.id }}
-                    className={cn(
-                      "flex h-8 items-center gap-2 rounded-md ps-3 text-sm hover:bg-sidebar-accent",
-                      activeId === p.id && "bg-sidebar-accent font-medium",
-                    )}
+                    onClick={() => isMobile && setOpenMobile(false)}
+                    className="flex h-full min-w-0 flex-1 items-center gap-2 ps-3"
                   >
                     <PageIcon page={p} />
                     <span className="truncate">{pageTitle(p)}</span>
                   </Link>
+                  <button
+                    type="button"
+                    aria-label={`Remove ${pageTitle(p)} from favorites`}
+                    title="Remove from favorites"
+                    onClick={() => void actions.favorite(p.id, false)}
+                    className="flex size-6 shrink-0 items-center justify-center rounded opacity-0 hover:bg-sidebar-border/60 focus-visible:opacity-100 group-hover/fav:opacity-100"
+                  >
+                    <StarOff className="size-3.5" />
+                  </button>
                 </li>
               ))}
             </ul>
