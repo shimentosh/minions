@@ -242,9 +242,20 @@ only: title-only sub-page folders (the tree had come out flat), looser row match
 (400 row pages would have been imported twice), and many more credential shapes
 (47 → 85 found; password-shaped text left after redaction 62 → 6).
 
+Added after that: **content search**, as designed under Search: bodies are fetched
+in batches (`POST /pages/contents`), decrypted on the device and indexed with MiniSearch
+in memory; ⌘K and the Pages list find pages by title or content and show the matching
+line. Favorites change at once (optimistic) and can be removed from the sidebar; pages
+move with **Move to…** as well as by dragging; trash has Undo and deleting for good asks
+first; closing the tab with an unsaved edit asks first. Decrypted titles are reused
+while their ciphertext is unchanged, so refreshing the tree no longer decrypts every
+title again. Fixed: autosave could send overlapping saves while typing, which showed
+"This page changed elsewhere" to a person editing alone.
+
 Left for phase 2 (as planned there): editing database properties and views, version
-history UI, content search, block drag handle, covers, files in backups, and lowering
-the importer's memory use on very large exports.
+history UI, block drag handle, covers, files in backups, persisting the search index
+(encrypted) for very large vaults, and lowering the importer's memory use on very
+large exports.
 
 Not planned: a server-side Notion API importer. The Notion API cannot be called from the
 browser (CORS), so a server proxy would see plaintext; a desktop-app-only connector can

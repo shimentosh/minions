@@ -18,6 +18,7 @@ import { CommandPalette } from "@/components/command-palette";
 import { AppSidebar } from "@/components/layout/app-sidebar";
 import { ExtensionConnectDialog } from "@/components/layout/extension-connect-dialog";
 import { VerifyEmailBanner } from "@/components/layout/verify-email-banner";
+import { MovePageDialog } from "@/components/pages/move-page-dialog";
 import { QuickCaptureDialog } from "@/components/quick-capture";
 import { SidebarInset, SidebarProvider } from "@/components/ui/sidebar";
 import { ToastProvider } from "@/components/ui/toast";
@@ -87,6 +88,7 @@ function AppShell() {
           </SidebarInset>
         </OrganizeDnd>
         <MoveDialog />
+        <MovePageDialog />
         <CommandPalette />
         <QuickCaptureDialog />
         <ItemEditorDialog />

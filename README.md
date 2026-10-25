@@ -215,7 +215,7 @@ pnpm typecheck
 pnpm lint
 pnpm --filter @minions/web test      # page tree, Notion import (parsing, credentials, conversion)
 node tests/e2e/smoke.mjs             # needs `pnpm dev` running
-node tests/e2e/pages.mjs             # pages, editor, lock/unlock, Notion import, archive
+node tests/e2e/pages.mjs             # pages, editor, favorites, search, move, lock/unlock, Notion import, archive
 pnpm --filter @minions/extension build && node tests/e2e/extension.mjs
 ```
 

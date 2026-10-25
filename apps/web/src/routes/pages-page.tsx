@@ -4,6 +4,7 @@ import { Link, useNavigate, useParams, useSearch } from "@tanstack/react-router"
 import {
   Archive,
   ArchiveRestore,
+  CornerUpRight,
   FileText,
   FileUp,
   Lock,
@@ -16,7 +17,18 @@ import {
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Page } from "@/components/layout/page";
 import { PageEditor } from "@/components/pages/page-editor";
-import { PageIcon, toggleArchive } from "@/components/pages/page-tree";
+import { PageIcon, toggleArchive, trashPage } from "@/components/pages/page-tree";
+import { openMovePage } from "@/components/pages/pages-context";
+import { SnippetLine } from "@/components/pages/snippet-line";
+import {
+  AlertDialog,
+  AlertDialogClose,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogPopup,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -44,6 +56,7 @@ import {
   usePageTree,
 } from "@/lib/pages/queries";
 import { EMPTY_DOC } from "@/lib/pages/schema";
+import { type PageHit, type Snippet, searchAllPages, usePageSearchIndex } from "@/lib/pages/search";
 import {
   ancestorsOf,
   archivedRoots,
@@ -51,7 +64,6 @@ import {
   type PageEntry,
   type PageIndex,
   pageTitle,
-  searchPages,
 } from "@/lib/pages/tree";
 import { toast } from "@/lib/toast";
 
@@ -204,6 +216,63 @@ function DatabaseTable({ open, rows }: { open: OpenPage; rows: PageEntry[] }) {
   );
 }
 
+/** "Delete permanently", after a confirmation: it cannot be undone. */
+function PurgeButton({
+  page,
+  onDone,
+  size = "xs",
+  variant = "destructive-outline",
+}: {
+  page: Pick<PageEntry, "id" | "title">;
+  onDone?: () => void;
+  size?: "xs";
+  variant?: "destructive-outline" | "ghost";
+}) {
+  const actions = usePageActions();
+  const [open, setOpen] = useState(false);
+  const [busy, setBusy] = useState(false);
+  return (
+    <>
+      <Button size={size} variant={variant} onClick={() => setOpen(true)}>
+        <Trash2 /> Delete permanently
+      </Button>
+      <AlertDialog open={open} onOpenChange={setOpen}>
+        <AlertDialogPopup>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Delete “{pageTitle(page)}” permanently?</AlertDialogTitle>
+            <AlertDialogDescription>
+              The page, its sub-pages, their history and files are erased. This cannot be undone.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogClose render={<Button variant="ghost" />}>Cancel</AlertDialogClose>
+            <Button
+              variant="destructive"
+              loading={busy}
+              onClick={() => {
+                setBusy(true);
+                void actions.purge(page.id).then(
+                  () => {
+                    setOpen(false);
+                    toast.success("Deleted permanently");
+                    onDone?.();
+                  },
+                  (e) => {
+                    setBusy(false);
+                    toast.error(errorMessage(e));
+                  },
+                );
+              }}
+            >
+              Delete permanently
+            </Button>
+          </AlertDialogFooter>
+        </AlertDialogPopup>
+      </AlertDialog>
+    </>
+  );
+}
+
 function PageView({ id }: { id: string }) {
   const { data, isLoading, error } = usePage(id);
   const { index, archived } = usePageTree();
@@ -229,28 +298,45 @@ function PageView({ id }: { id: string }) {
     setIcon(data.meta.icon);
   }, [data?.detail.id]);
 
-  const flush = useCallback(async () => {
-    const cur = latest.current;
-    if (!cur.page) return;
+  // One save at a time: each is based on the revision the previous one returned.
+  const inFlight = useRef<Promise<void> | null>(null);
+  const again = useRef(false);
+  const flush = useCallback(async (): Promise<void> => {
+    if (!latest.current.page) return;
     window.clearTimeout(timer.current);
     timer.current = undefined;
+    if (inFlight.current) {
+      again.current = true;
+      return inFlight.current;
+    }
+    const cur = { ...latest.current, page: latest.current.page };
     setSave("saving");
-    try {
-      const updated = await savePage(cur.page, cur.meta, cur.content);
-      latest.current.page = updated;
-      qc.setQueryData<OpenPage>([...PAGES_KEY, "page", updated.id], (old) =>
-        old ? { ...old, detail: updated, meta: cur.meta, content: cur.content } : old,
-      );
-      setSave("saved");
-      void actions.refresh();
-    } catch (e) {
-      setSave("error");
-      toast.error(
-        errorMessage(e),
-        e instanceof ApiError && e.code === "REVISION_CONFLICT"
-          ? "Reload the page to get the latest version."
-          : undefined,
-      );
+    const run = (async () => {
+      try {
+        const updated = await savePage(cur.page, cur.meta, cur.content);
+        latest.current.page = updated;
+        qc.setQueryData<OpenPage>([...PAGES_KEY, "page", updated.id], (old) =>
+          old ? { ...old, detail: updated, meta: cur.meta, content: cur.content } : old,
+        );
+        if (!again.current && !timer.current) setSave("saved");
+        void actions.refresh();
+      } catch (e) {
+        again.current = false;
+        setSave("error");
+        toast.error(
+          errorMessage(e),
+          e instanceof ApiError && e.code === "REVISION_CONFLICT"
+            ? "Reload the page to get the latest version."
+            : undefined,
+        );
+      }
+    })();
+    inFlight.current = run;
+    await run;
+    inFlight.current = null;
+    if (again.current) {
+      again.current = false;
+      await flush();
     }
   }, [qc, actions]);
 
@@ -267,6 +353,17 @@ function PageView({ id }: { id: string }) {
     },
     [flush],
   );
+
+  // Closing the tab or reloading before the last edit is saved asks first.
+  useEffect(() => {
+    if (save !== "dirty" && save !== "saving" && save !== "error") return;
+    const warn = (e: BeforeUnloadEvent) => {
+      if (timer.current) void flush();
+      e.preventDefault();
+    };
+    window.addEventListener("beforeunload", warn);
+    return () => window.removeEventListener("beforeunload", warn);
+  }, [save, flush]);
 
   const upload = useCallback(
     async (file: File): Promise<{ fileId: string; name: string; size: number } | null> => {
@@ -366,8 +463,10 @@ function PageView({ id }: { id: string }) {
           <Button
             variant="ghost"
             size="icon-sm"
-            aria-label="Favorite"
-            disabled={trashed}
+            aria-label={entry?.favorite ? "Remove from favorites" : "Add to favorites"}
+            aria-pressed={!!entry?.favorite}
+            title={entry?.favorite ? "Remove from favorites" : "Add to favorites"}
+            disabled={trashed || !entry}
             onClick={() => void actions.favorite(id, !entry?.favorite)}
           >
             <Star className={entry?.favorite ? "fill-amber-400 text-amber-400" : ""} />
@@ -377,6 +476,17 @@ function PageView({ id }: { id: string }) {
               <MoreHorizontal />
             </MenuTrigger>
             <MenuPopup align="end">
+              {!trashed && entry && (
+                <MenuItem onClick={() => void actions.favorite(id, !entry.favorite)}>
+                  <Star />
+                  {entry.favorite ? "Remove from favorites" : "Add to favorites"}
+                </MenuItem>
+              )}
+              {!trashed && (
+                <MenuItem onClick={() => openMovePage(id)}>
+                  <CornerUpRight /> Move to…
+                </MenuItem>
+              )}
               {!trashed && (
                 <MenuItem onClick={() => void toggleArchive(actions, [id], !isArchived)}>
                   {isArchived ? <ArchiveRestore /> : <Archive />}
@@ -387,12 +497,8 @@ function PageView({ id }: { id: string }) {
                 <MenuItem
                   variant="destructive"
                   onClick={() =>
-                    void actions.trash(id).then(
-                      () => {
-                        toast.success("Moved to trash");
-                        void navigate({ to: "/pages" });
-                      },
-                      (e) => toast.error(errorMessage(e)),
+                    void trashPage(actions, id).then(
+                      (done) => done && void navigate({ to: "/pages" }),
                     )
                   }
                 >
@@ -434,17 +540,10 @@ function PageView({ id }: { id: string }) {
             >
               <ArchiveRestore /> Restore
             </Button>
-            <Button
-              size="xs"
-              variant="destructive-outline"
-              onClick={() =>
-                void actions
-                  .purge(id)
-                  .then(() => navigate({ to: "/pages", search: { view: "trash" } }))
-              }
-            >
-              <Trash2 /> Delete permanently
-            </Button>
+            <PurgeButton
+              page={{ id, title }}
+              onDone={() => void navigate({ to: "/pages", search: { view: "trash" } })}
+            />
           </div>
         )}
         <div className="px-4 pt-8 md:px-12 md:pt-14">
@@ -477,6 +576,8 @@ function PageView({ id }: { id: string }) {
             }}
             placeholder="Untitled"
             disabled={trashed}
+            // biome-ignore lint/a11y/noAutofocus: a new page opens with its title ready to type, as in Notion
+            autoFocus={!trashed && !data.meta.title && !data.content}
             className="mt-2 field-sizing-content w-full resize-none bg-transparent font-bold text-4xl leading-tight outline-none placeholder:text-muted-foreground/40"
           />
           <p className="mt-1 flex items-center gap-1 text-muted-foreground text-xs">
@@ -543,6 +644,7 @@ function PageRows({
   selected,
   onSelect,
   detail,
+  snippets,
 }: {
   rows: PageEntry[];
   index: PageIndex;
@@ -550,11 +652,14 @@ function PageRows({
   selected: Set<string>;
   onSelect: (id: string, on: boolean) => void;
   detail?: (p: PageEntry) => string;
+  /** Search results: the words found in each page's content. */
+  snippets?: Map<string, Snippet | null>;
 }) {
   return (
     <ul className="divide-y rounded-xl border">
       {rows.map((p) => {
         const path = ancestorsOf(index, p.id).map(pageTitle).join(" / ");
+        const snippet = snippets?.get(p.id);
         return (
           <li key={p.id} className="flex items-center gap-2 ps-3 hover:bg-accent/50">
             <input
@@ -571,6 +676,7 @@ function PageRows({
               <PageIcon page={p} />
               <span className="min-w-0 flex-1">
                 <span className="block truncate">{pageTitle(p)}</span>
+                {snippet && <SnippetLine snippet={snippet} />}
                 {path && (
                   <span className="block truncate text-muted-foreground text-xs">{path}</span>
                 )}
@@ -617,19 +723,40 @@ export function PagesHome() {
       return next;
     });
 
+  // Titles and content; content search fills in as the index is built.
+  const indexState = usePageSearchIndex(active.pages, !trash);
+  // biome-ignore lint/correctness/useExhaustiveDependencies: re-run as the index grows
+  const hits = useMemo<PageHit[] | null>(
+    () => (q.trim() ? searchAllPages(active.visible ?? [], q, 100) : null),
+    [active.visible, q, indexState.indexed],
+  );
   const results = useMemo(() => {
+    if (hits) return hits.map((h) => h.page);
     const all = active.visible ?? [];
-    if (q.trim()) return searchPages(all, q);
     return [...all].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)).slice(0, 30);
-  }, [active.visible, q]);
+  }, [active.visible, hits]);
+  const snippets = useMemo(
+    () => (hits ? new Map(hits.map((h) => [h.page.id, h.snippet])) : undefined),
+    [hits],
+  );
 
-  // The archive: each archived group once, by its top page.
-  const archivedRows = useMemo(() => {
+  // The archive: each archived group once, by its top page; found by title or content.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: re-run as the index grows
+  const archivedHits = useMemo(() => {
     const roots = archivedRoots(active.index, active.archived);
-    return (q.trim() ? searchPages(roots, q, 1000) : roots).sort((a, b) =>
-      (b.archivedAt ?? "").localeCompare(a.archivedAt ?? ""),
-    );
-  }, [active.index, active.archived, q]);
+    if (!q.trim()) return null;
+    return searchAllPages(roots, q, 1000);
+  }, [active.index, active.archived, q, indexState.indexed]);
+  const archivedRows = useMemo(() => {
+    const rows = archivedHits
+      ? archivedHits.map((h) => h.page)
+      : archivedRoots(active.index, active.archived);
+    return rows.sort((a, b) => (b.archivedAt ?? "").localeCompare(a.archivedAt ?? ""));
+  }, [archivedHits, active.index, active.archived]);
+  const archivedSnippets = useMemo(
+    () => (archivedHits ? new Map(archivedHits.map((h) => [h.page.id, h.snippet])) : undefined),
+    [archivedHits],
+  );
 
   const shown = archiveView ? archivedRows : results;
   const picked = shown.filter((p) => selected.has(p.id));
@@ -722,9 +849,7 @@ export function PagesHome() {
                 <Button size="xs" variant="ghost" onClick={() => void actions.restore(p.id)}>
                   <ArchiveRestore /> Restore
                 </Button>
-                <Button size="xs" variant="ghost" onClick={() => void actions.purge(p.id)}>
-                  <Trash2 /> Delete
-                </Button>
+                <PurgeButton page={p} variant="ghost" />
               </li>
             ))}
             {!trashed.isLoading && trashRoots.length === 0 && (
@@ -736,15 +861,23 @@ export function PagesHome() {
         ) : (
           <>
             <div className="relative">
-              <SearchIcon className="-translate-y-1/2 pointer-events-none absolute top-1/2 left-2.5 size-4 text-muted-foreground/70" />
+              <SearchIcon className="-translate-y-1/2 pointer-events-none absolute top-1/2 left-2.5 z-10 size-4 text-muted-foreground/70" />
               <Input
                 value={q}
                 onChange={(e) => setQ(e.target.value)}
-                placeholder={archiveView ? "Search archived pages…" : "Search page titles…"}
+                placeholder={
+                  archiveView ? "Search archived pages…" : "Search page titles and content…"
+                }
                 className="ps-8"
                 autoFocus
               />
             </div>
+            {q.trim() && indexState.building && (
+              <p className="text-muted-foreground text-xs">
+                Searching titles now; reading page contents on this device ({indexState.indexed} of{" "}
+                {indexState.total})…
+              </p>
+            )}
             <div className="flex min-h-7 flex-wrap items-center gap-2 text-sm">
               {!archiveView && active.archived.size > 0 && (
                 <label className="flex items-center gap-1.5 text-muted-foreground text-xs">
@@ -798,6 +931,7 @@ export function PagesHome() {
                   selected={selected}
                   onSelect={onSelect}
                   detail={(p) => (p.archivedAt ? `archived ${timeAgo(p.archivedAt)}` : "")}
+                  snippets={archivedSnippets}
                 />
               </>
             )}
@@ -834,6 +968,7 @@ export function PagesHome() {
                   archived={active.archived}
                   selected={selected}
                   onSelect={onSelect}
+                  snippets={snippets}
                 />
               </>
             )}
@@ -842,7 +977,7 @@ export function PagesHome() {
               results.length === 0 &&
               (active.pages ?? []).length > 0 && (
                 <p className="rounded-xl border px-3 py-6 text-center text-muted-foreground text-sm">
-                  {q.trim() ? "No page title matches." : "Every page is archived."}
+                  {q.trim() ? "No page matches." : "Every page is archived."}
                   {active.archived.size > 0 && !showArchived && (
                     <>
                       {" "}

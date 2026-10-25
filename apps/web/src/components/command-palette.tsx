@@ -1,8 +1,10 @@
 import { getItemType, type Page, type VaultItemSummary } from "@minions/core";
 import { useQuery } from "@tanstack/react-query";
-import { useNavigate } from "@tanstack/react-router";
+import { useNavigate, useRouterState } from "@tanstack/react-router";
 import { ArrowDownIcon, ArrowUpIcon, CornerDownLeftIcon } from "lucide-react";
 import { Fragment, useCallback, useEffect, useMemo, useState } from "react";
+import { PageIcon } from "@/components/pages/page-tree";
+import { SnippetLine } from "@/components/pages/snippet-line";
 import {
   Command,
   CommandCollection,
@@ -20,10 +22,14 @@ import {
   CommandShortcut,
 } from "@/components/ui/command";
 import { Kbd, KbdGroup } from "@/components/ui/kbd";
-import { get } from "@/lib/api";
+import { errorMessage, get } from "@/lib/api";
 import { useShowArchived } from "@/lib/archive";
 import { ItemGlyph } from "@/lib/item-icons";
+import { usePageActions, usePageTree } from "@/lib/pages/queries";
+import { type Snippet, searchAllPages, usePageSearchIndex } from "@/lib/pages/search";
+import { ancestorsOf, type PageEntry, pageTitle } from "@/lib/pages/tree";
 import { useSession } from "@/lib/session";
+import { toast } from "@/lib/toast";
 import { useUi } from "@/lib/ui-store";
 
 interface PaletteItem {
@@ -33,6 +39,10 @@ interface PaletteItem {
   hint?: string;
   shortcut?: string;
   itemType?: string;
+  page?: PageEntry;
+  snippet?: Snippet | null;
+  /** Already matched (pages are searched here, on the device): skips the text filter. */
+  matched?: boolean;
   onRun: () => void;
 }
 
@@ -88,6 +98,31 @@ export function CommandPalette() {
     placeholderData: (prev) => prev,
   });
 
+  // Pages are decrypted on this device: titles at once, content as the index fills in.
+  const { visible: pages, index: pageIndex } = usePageTree();
+  const pageActions = usePageActions();
+  const { indexed } = usePageSearchIndex(pages, open);
+  const onPages = useRouterState({ select: (s) => s.location.pathname.startsWith("/pages") });
+  // biome-ignore lint/correctness/useExhaustiveDependencies: re-run as the index fills in
+  const pageItems = useMemo<PaletteItem[]>(() => {
+    const q = query.trim();
+    const list = q
+      ? searchAllPages(pages ?? [], q, 8)
+      : [...(pages ?? [])]
+          .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
+          .slice(0, 5)
+          .map((page) => ({ page, snippet: null }));
+    return list.map(({ page, snippet }) => ({
+      value: `page-${page.id}`,
+      label: pageTitle(page),
+      hint: ancestorsOf(pageIndex, page.id).map(pageTitle).join(" / ") || undefined,
+      page,
+      snippet,
+      matched: true,
+      onRun: () => void navigate({ to: "/pages/$pageId", params: { pageId: page.id } }),
+    }));
+  }, [pages, pageIndex, query, indexed, navigate]);
+
   const run = useCallback(
     (fn: () => void) => {
       setOpen(false);
@@ -106,8 +141,14 @@ export function CommandPalette() {
       keywords: `${debounced} ${i.subtitle ?? ""} ${i.host ?? ""} ${i.provider ?? ""} ${i.project?.name ?? ""}`,
       onRun: () => void navigate({ to: "/vault", search: { item: i.id } }),
     }));
+    const pageGroup = {
+      value: "pages",
+      label: query.trim() ? "Pages" : "Recent pages",
+      items: pageItems,
+    };
+    const itemGroup = { value: "items", label: debounced ? "Vault" : "Recently used", items };
     return [
-      { value: "items", label: debounced ? "Vault" : "Recently used", items },
+      ...(onPages ? [pageGroup, itemGroup] : [itemGroup, pageGroup]),
       {
         value: "create",
         label: "Create",
@@ -129,6 +170,16 @@ export function CommandPalette() {
             label: "Create item…",
             keywords: "new add server database card bank ssh",
             onRun: () => openEditor({}),
+          },
+          {
+            value: "new-page",
+            label: "Create page",
+            keywords: "page doc wiki notion new write",
+            onRun: () =>
+              void pageActions.create({ parentId: null }).then(
+                (id) => navigate({ to: "/pages/$pageId", params: { pageId: id } }),
+                (e) => toast.error(errorMessage(e)),
+              ),
           },
           {
             value: "new-note",
@@ -185,6 +236,12 @@ export function CommandPalette() {
             onRun: () => void navigate({ to: "/activity" }),
           },
           {
+            value: "go-pages",
+            label: "All pages",
+            keywords: "pages docs wiki notion",
+            onRun: () => void navigate({ to: "/pages" }),
+          },
+          {
             value: "go-notes",
             label: "Notes",
             keywords: "notes",
@@ -212,7 +269,18 @@ export function CommandPalette() {
         ],
       },
     ].filter((g) => g.items.length > 0);
-  }, [data, debounced, navigate, openEditor, setCapture, lock]);
+  }, [
+    data,
+    debounced,
+    query,
+    pageItems,
+    onPages,
+    pageActions,
+    navigate,
+    openEditor,
+    setCapture,
+    lock,
+  ]);
 
   return (
     <CommandDialog open={open} onOpenChange={setOpen}>
@@ -223,10 +291,14 @@ export function CommandPalette() {
           onValueChange={(v: string) => setQuery(v)}
           filter={(item: unknown, q: string) => {
             const p = item as PaletteItem;
-            return !q || `${p.label} ${p.keywords ?? ""}`.toLowerCase().includes(q.toLowerCase());
+            return (
+              !q ||
+              !!p.matched ||
+              `${p.label} ${p.keywords ?? ""}`.toLowerCase().includes(q.toLowerCase())
+            );
           }}
         >
-          <CommandInput placeholder="Search the vault or type a command…" />
+          <CommandInput placeholder="Search the vault and pages, or type a command…" />
           <CommandPanel>
             <CommandEmpty>No results.</CommandEmpty>
             <CommandList>
@@ -245,7 +317,15 @@ export function CommandPalette() {
                           {item.itemType && (
                             <ItemGlyph type={item.itemType} className="size-6 [&_svg]:size-3.5" />
                           )}
-                          <span className="flex-1 truncate">{item.label}</span>
+                          {item.page && (
+                            <span className="flex size-6 shrink-0 items-center justify-center">
+                              <PageIcon page={item.page} className="text-muted-foreground" />
+                            </span>
+                          )}
+                          <span className="min-w-0 flex-1">
+                            <span className="block truncate">{item.label}</span>
+                            {item.snippet && <SnippetLine snippet={item.snippet} />}
+                          </span>
                           {item.hint && (
                             <span className="max-w-[40%] truncate text-muted-foreground text-xs">
                               {item.hint}

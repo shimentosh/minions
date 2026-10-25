@@ -106,10 +106,20 @@ export function positions(n: number): string[] {
   return generateNKeysBetween(null, null, n);
 }
 
+/**
+ * Lowercase with Latin accents off, so "Café" matches "cafe". Only the Latin
+ * combining accents go: in Bengali or Hindi the marks are vowel signs, and
+ * dropping them would make different words look the same.
+ */
+export const fold = (s: string) =>
+  s
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .normalize("NFC")
+    .toLowerCase();
+
 /** Case- and accent-insensitive title match, for the sidebar filter and ⌘K. */
 export function searchPages(pages: PageEntry[], query: string, limit = 50): PageEntry[] {
-  // Decomposed accents are combining marks: dropping them makes "café" match "cafe".
-  const fold = (s: string) => s.normalize("NFKD").replace(/\p{M}/gu, "").toLowerCase();
   const terms = fold(query).split(/\s+/).filter(Boolean);
   if (!terms.length) return [];
   const scored: { p: PageEntry; score: number }[] = [];

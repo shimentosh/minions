@@ -301,6 +301,14 @@ API `apps/api/src/pages`, client `apps/web/src/lib/pages`, importer `apps/web/sr
   they hid. One "Show archived" switch per device (`lib/archive.ts`, a yes/no in
   `localStorage`). Autofill, opening an item and the Security Center still see
   archived items. Backups keep the state.
+- **Search.** Titles are searched in memory from the tree. Content search
+  (`lib/pages/search.ts`) asks `POST /pages/contents` for up to 100 encrypted bodies at
+  a time (at most ~4 MB per response; the rest come back as ids to ask for again),
+  decrypts them on the device and keeps a MiniSearch index in memory only, dropped on
+  lock. A page is fetched again only when its revision changes. The server sees which
+  ids are asked for, never the query. ⌘K and the Pages list search titles and content.
+- **Favorites** are the plaintext `favorite` flag (`PATCH /pages/:id`). The client
+  shows the change before the request returns and undoes it if the request fails.
 - **Notion import** runs on the device: zip.js reads the export in place (parts and
   nested zips too), Markdown/HTML go through DOMPurify and the editor schema,
   databases come from the CSV (or the HTML table), and credentials found in pages,
