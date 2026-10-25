@@ -273,6 +273,13 @@ export interface PageDetail extends PageNode {
   contentEnc: string | null;
 }
 
+/** POST /pages/contents: encrypted bodies, so the client can build its search index. */
+export interface PageContentsResponse {
+  pages: { id: string; revision: number; contentEnc: string | null }[];
+  /** Ids left out to keep the response small: ask for them again. */
+  rest: string[];
+}
+
 export interface CreatePageRequest {
   id: string;
   parentId: string | null;
