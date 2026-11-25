@@ -71,6 +71,9 @@ function isHello(d: Record<string, unknown>): ExtensionHello | null {
   };
 }
 
+/** The extension said no, with a reason written for the user. */
+class ExtensionRefused extends Error {}
+
 let linkedWaiter: ((r: { ok: boolean; error?: string }) => void) | null = null;
 
 function onMessage(e: MessageEvent) {
@@ -101,7 +104,10 @@ function waitForLinked(): Promise<{ ok: boolean; error?: string }> {
   return new Promise((resolve) => {
     const timer = window.setTimeout(() => {
       linkedWaiter = null;
-      resolve({ ok: false, error: "The extension did not answer" });
+      resolve({
+        ok: false,
+        error: "The extension did not answer. Reload this page and try again.",
+      });
     }, 10_000);
     linkedWaiter = (r) => {
       window.clearTimeout(timer);
@@ -137,11 +143,13 @@ export async function connectExtension(opts: { quiet?: boolean } = {}): Promise<
       window.location.origin,
     );
     const result = await answer;
-    if (!result.ok) throw new Error(result.error ?? "The extension refused the connection");
+    if (!result.ok)
+      throw new ExtensionRefused(result.error ?? "The extension refused the connection");
     if (!opts.quiet) toast.success("Extension connected", "It unlocks with this app from now on.");
     return true;
   } catch (e) {
-    if (!opts.quiet) toast.error(errorMessage(e));
+    // The extension's own reason is meant for the user; other errors stay generic.
+    if (!opts.quiet) toast.error(e instanceof ExtensionRefused ? e.message : errorMessage(e));
     return false;
   } finally {
     useExtensionBridge.setState({ linking: false });

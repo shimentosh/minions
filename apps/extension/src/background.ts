@@ -161,7 +161,9 @@ async function api<T>(
   } = {},
 ): Promise<T> {
   const token = init.token ?? (await currentToken());
-  const url = new URL(path, __API_URL__);
+  // Appended, not resolved: new URL("/auth/me", "https://host/api") would drop
+  // the /api prefix and reach the web app instead of the API.
+  const url = new URL(`${__API_URL__}${path}`);
   for (const [k, v] of Object.entries(init.query ?? {})) url.searchParams.set(k, v);
   const res = await fetch(url, {
     method: init.method ?? (init.body !== undefined ? "POST" : "GET"),
@@ -193,6 +195,9 @@ async function api<T>(
         ? data.message[0]
         : (data?.message ?? `Request failed (${res.status})`),
     );
+  // A page instead of an API answer: the extension was built for the wrong address.
+  if (res.headers.get("content-type")?.includes("text/html"))
+    throw new Error(`No answer from the Minions API at ${__API_URL__}`);
   return data as T;
 }
 
