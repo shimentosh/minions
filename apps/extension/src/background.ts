@@ -662,9 +662,16 @@ async function fillTab(
   ref: { itemId: string; workspaceId?: string; shared?: boolean },
   /** The user confirmed filling a login saved without a website here: remember the site on it. */
   link = false,
+  /**
+   * The page's address as the browser reported it with the request (a content
+   * script's sender.url). Asked from a page, the extension may not read the
+   * tab's address itself: it has no access to most sites until the toolbar
+   * button is clicked.
+   */
+  senderUrl?: string,
 ) {
-  const tab = await chrome.tabs.get(tabId);
-  const pageUrl = tab.url ?? "";
+  const pageUrl = senderUrl ?? (await chrome.tabs.get(tabId)).url ?? "";
+  if (!pageUrl) throw new Error("Open Minions from the toolbar to fill this page");
   const host = normalizeHost(pageUrl);
   const opened = await openItem(ref.itemId, ref.workspaceId, ref.shared);
   const { item } = opened;
@@ -1057,7 +1064,7 @@ async function handle(req: Request, sender: chrome.runtime.MessageSender): Promi
     case "inlineFill":
       // Into the tab that asked; fillTab still checks its address against the item.
       await session.set({ lastActivity: Date.now() });
-      await fillTab(sender.tab!.id!, req, !!req.link);
+      await fillTab(sender.tab!.id!, req, !!req.link, sender.url);
       return null;
     case "usernameSeen": {
       if ((await session.get()).status !== "unlocked" || !senderHost || !req.username) return null;

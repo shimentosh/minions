@@ -715,6 +715,43 @@ try {
     );
     await appPage.close();
   }
+
+  // The shipped extension, as people install it (no "tabs" permission): the
+  // menu on a page must fill without reading the tab's address itself.
+  const plain = await chromium.launchPersistentContext(
+    mkdtempSync(`${tmpdir()}/minions-ext-plain-`),
+    {
+      headless: true,
+      channel: "chromium",
+      args: [`--disable-extensions-except=${BUILT}`, `--load-extension=${BUILT}`],
+    },
+  );
+  try {
+    const sw2 = plain.serviceWorkers()[0] ?? (await plain.waitForEvent("serviceworker"));
+    const pop2 = await plain.newPage();
+    await pop2.goto(`chrome-extension://${new URL(sw2.url()).host}/popup.html`);
+    await pop2.evaluate((creds) => chrome.runtime.sendMessage({ type: "login", ...creds }), {
+      email,
+      password,
+    });
+    const page2 = await plain.newPage();
+    await page2.goto("http://localhost:5199/login");
+    await page2.focus("#u");
+    await page2
+      .waitForSelector("#minions-fill-menu", { state: "attached", timeout: 5000 })
+      .catch(() => undefined);
+    await page2.keyboard.press("ArrowDown");
+    await page2.keyboard.press("Enter");
+    await page2
+      .waitForFunction(() => document.querySelector("#p").value !== "", null, { timeout: 5000 })
+      .catch(() => undefined);
+    check(
+      (await page2.inputValue("#p")) !== "",
+      "the shipped extension fills from the menu on a page (no tab access needed)",
+    );
+  } finally {
+    await plain.close();
+  }
 } finally {
   await ctx.close();
   site.close();
