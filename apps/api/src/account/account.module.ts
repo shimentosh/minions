@@ -61,7 +61,6 @@ class RevokeAllDto {
 
 const Id = () => Param("id", new ParseUUIDPipe({ version: "4" }));
 
-
 @Injectable()
 export class DevicesService {
   constructor(

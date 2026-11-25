@@ -55,3 +55,61 @@ export const persisted = {
     await run("readwrite", (s) => s.delete(KEY)).catch(() => undefined);
   },
 };
+
+// ─── "Remember on this computer" ─────────────────────────────────────────────
+// Only when the user turns it on. The vault keys are kept encrypted under an
+// AES key that cannot be read out by script (a non-extractable CryptoKey),
+// in this extension's own IndexedDB. Locking or signing out deletes both.
+// This protects against other extensions, websites and casual copying of
+// files; not against someone using this computer account, which is the
+// trade-off the user chose for not typing the master password again.
+
+export interface RememberedKeys {
+  userId: string;
+  vaultId: string;
+  vaultKey: string;
+  privateKey: string | null;
+}
+
+const DEVICE_KEY = "deviceKey";
+const REMEMBERED = "remembered";
+
+export const remembered = {
+  async save(v: RememberedKeys) {
+    let key = await run<CryptoKey | undefined>("readonly", (s) => s.get(DEVICE_KEY));
+    if (!key) {
+      key = await crypto.subtle.generateKey({ name: "AES-GCM", length: 256 }, false, [
+        "encrypt",
+        "decrypt",
+      ]);
+      await run("readwrite", (s) => s.put(key, DEVICE_KEY));
+    }
+    const iv = crypto.getRandomValues(new Uint8Array(12));
+    const data = await crypto.subtle.encrypt(
+      { name: "AES-GCM", iv },
+      key,
+      new TextEncoder().encode(JSON.stringify(v)),
+    );
+    await run("readwrite", (s) => s.put({ iv, data }, REMEMBERED));
+  },
+  async load(): Promise<RememberedKeys | null> {
+    const key = await run<CryptoKey | undefined>("readonly", (s) => s.get(DEVICE_KEY)).catch(
+      () => undefined,
+    );
+    const box = await run<{ iv: Uint8Array<ArrayBuffer>; data: ArrayBuffer } | undefined>(
+      "readonly",
+      (s) => s.get(REMEMBERED),
+    ).catch(() => undefined);
+    if (!key || !box) return null;
+    try {
+      const plain = await crypto.subtle.decrypt({ name: "AES-GCM", iv: box.iv }, key, box.data);
+      return JSON.parse(new TextDecoder().decode(plain)) as RememberedKeys;
+    } catch {
+      return null;
+    }
+  },
+  async clear() {
+    await run("readwrite", (s) => s.delete(REMEMBERED)).catch(() => undefined);
+    await run("readwrite", (s) => s.delete(DEVICE_KEY)).catch(() => undefined);
+  },
+};

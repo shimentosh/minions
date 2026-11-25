@@ -201,6 +201,30 @@ try {
     await site3.evaluate(() => document.getElementById("minions-fill-menu")?.shadowRoot === null),
     "the page cannot read inside the menu",
   );
+  // The Minions button inside the field: there on focus, and it brings a closed menu back.
+  const iconBox = await site3
+    .waitForSelector("#minions-field-icon", { state: "visible", timeout: 5000 })
+    .then((h) => h.boundingBox())
+    .catch(() => null);
+  const fieldBox = await site3.locator("#u").boundingBox();
+  check(
+    !!iconBox &&
+      !!fieldBox &&
+      iconBox.x > fieldBox.x + fieldBox.width / 2 &&
+      iconBox.x + iconBox.width <= fieldBox.x + fieldBox.width,
+    "a Minions button sits inside the right edge of the login field",
+  );
+  await site3.keyboard.press("Escape");
+  await site3.waitForSelector("#minions-fill-menu", { state: "detached", timeout: 3000 });
+  if (iconBox)
+    await site3.mouse.click(iconBox.x + iconBox.width / 2, iconBox.y + iconBox.height / 2);
+  check(
+    await site3
+      .waitForSelector("#minions-fill-menu", { state: "attached", timeout: 3000 })
+      .then(() => true)
+      .catch(() => false),
+    "clicking the button opens the menu again",
+  );
   await site3.keyboard.press("ArrowDown");
   await site3.keyboard.press("Enter");
   await site3.waitForFunction(() => document.querySelector("#p").value !== "", null, {
@@ -358,7 +382,76 @@ try {
     const expected = (await core.generateTotp(secret)).code;
     check((await otp.inputValue("#code")) === expected, "fills the current 2FA code");
     await otp.close();
+
+    // A login saved without a website, named like the site: offered, confirmed, then remembered.
+    const loose = crypto.randomUUID();
+    const made2 = await fetch(`${API}/vault/items`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-minions-client": "web", cookie },
+      body: JSON.stringify({
+        id: loose,
+        type: "LOGIN",
+        name: "Acme portal",
+        fields: [
+          { key: "username", value: "road@acme.test", sensitive: false },
+          {
+            key: "password",
+            value: await core.encryptString(vk, "Loose-Pass-1!", core.aad.field(loose, "password")),
+            sensitive: true,
+          },
+        ],
+      }),
+    });
+    check(made2.status === 201, "test login without a website created");
+    await ctx.route("https://login.acme.test/**", (route) =>
+      route.fulfill({ contentType: "text/html", body: page }),
+    );
+    const acme = await ctx.newPage();
+    await acme.goto("https://login.acme.test/");
+    await acme.focus("#u");
+    check(await menuOn(acme), "a login saved without a website is offered on its site");
+    await acme.keyboard.press("ArrowDown");
+    await acme.keyboard.press("Enter");
+    await acme.waitForTimeout(300);
+    check((await acme.inputValue("#p")) === "", "nothing is filled before the user confirms");
+    await acme.keyboard.press("Enter");
+    await acme
+      .waitForFunction(() => document.querySelector("#p").value !== "", null, { timeout: 5000 })
+      .catch(() => undefined);
+    check(
+      (await acme.inputValue("#u")) === "road@acme.test" &&
+        (await acme.inputValue("#p")) === "Loose-Pass-1!",
+      "after confirming, it fills",
+    );
+    const acmeTab = await popup.evaluate(
+      async () => (await chrome.tabs.query({ url: "https://login.acme.test/*" })).at(-1).id,
+    );
+    const acmeMatch = await msg({ type: "match", tabId: acmeTab });
+    check(
+      acmeMatch.data?.items.some((i) => i.id === loose),
+      "and the site is remembered on the login for next time",
+    );
+    await acme.close();
   }
+
+  // "Remember on this computer": the vault opens again after a browser restart.
+  await popup.evaluate(() =>
+    chrome.storage.local.set({ settings: { autoSave: false, rememberDevice: true } }),
+  );
+  await msg({ type: "rememberDevice", on: true });
+  await popup.evaluate(() => chrome.storage.session.clear());
+  check(
+    (await msg({ type: "state" })).data.status === "unlocked",
+    "remembered on this computer: unlocked again after a restart",
+  );
+  await msg({ type: "lock" });
+  await popup.evaluate(() => chrome.storage.session.clear());
+  check(
+    (await msg({ type: "state" })).data.status === "locked",
+    "after a lock it is forgotten: a restart asks again",
+  );
+  await popup.evaluate(() => chrome.storage.local.set({ settings: { autoSave: false } }));
+  await msg({ type: "unlock", password });
 
   // Saved automatically: a new login once the sign-in goes through, with an Undo.
   await popup.evaluate(() => chrome.storage.local.remove("settings"));

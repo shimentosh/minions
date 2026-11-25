@@ -1368,6 +1368,15 @@ async function settingsView(state: StateResponse) {
         "div",
         { class: "card" },
         setting(
+          "Remember on this computer",
+          "Opens on its own even after the browser restarts: no master password on this computer. Anyone using this computer account can open your vault. Lock or sign out to forget. Works with auto-lock “Until the browser closes” in the Minions app.",
+          toggle(!!prefs.rememberDevice, "Remember on this computer", async (on) => {
+            await saveSettings({ rememberDevice: on });
+            await send({ type: "rememberDevice", on }).catch(() => undefined);
+            toast(on ? "Remembered on this computer" : "Forgotten on this computer");
+          }),
+        ),
+        setting(
           "Stay unlocked",
           "Unlock once and the extension stays unlocked until you close the browser. Off: it locks when you are away for your auto-lock time.",
           toggle(prefs.lockMode !== "idle", "Stay unlocked", (on) =>

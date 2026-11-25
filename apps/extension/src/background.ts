@@ -23,6 +23,7 @@ import {
   decryptString,
   deriveMasterKeys,
   encryptString,
+  equivalentDomains,
   estimateStrength,
   fromBase64,
   generatePassword,
@@ -37,10 +38,12 @@ import {
   openSealedKey,
   type Page,
   type PasswordOptions,
+  registrableDomain,
   type SharedItemDetail,
   type SharedWithMeItem,
   sealContext,
   secretFingerprint,
+  siteKeywords,
   toBase64,
   type UpsertItemRequest,
   unwrapKey,
@@ -68,7 +71,7 @@ import {
   type Status,
   type TotpEntry,
 } from "./messages";
-import { persisted } from "./persist";
+import { persisted, remembered } from "./persist";
 
 declare const __API_URL__: string;
 declare const __WEB_URL__: string;
@@ -157,7 +160,62 @@ async function currentToken(): Promise<string | undefined> {
     userId: saved.userId,
     status: "locked",
   });
+  await reopenRemembered();
   return saved.token;
+}
+
+let reopening: Promise<void> | null = null;
+
+/**
+ * "Remember on this computer": after a browser restart, open again from the
+ * keys kept on this computer, as long as the server still has this session
+ * unlocked. If the server has locked it, the master password is needed (and
+ * the kept keys are dropped).
+ */
+function reopenRemembered(): Promise<void> {
+  reopening ??= (async () => {
+    const s = await session.get();
+    if (s.status !== "locked" || !s.token) return;
+    if (!(await settings()).rememberDevice) return;
+    const kept = await remembered.load();
+    if (!kept || kept.userId !== s.userId) return;
+    const me = await api<MeResponse>("/auth/me", { token: s.token }).catch(() => null);
+    if (!me) return; // Offline: try again later.
+    if (!me.session.vaultUnlocked || me.user.id !== kept.userId || me.vaultId !== kept.vaultId) {
+      await remembered.clear();
+      return;
+    }
+    await session.set({
+      vaultKey: kept.vaultKey,
+      ...(kept.privateKey ? { privateKey: kept.privateKey } : {}),
+      vaultId: kept.vaultId,
+      status: "unlocked",
+      autoLockMinutes: me.user.autoLockMinutes,
+      email: me.user.email,
+      name: me.user.name,
+      lastActivity: Date.now(),
+    });
+    await scheduleLock();
+    stateChanged();
+  })().finally(() => {
+    reopening = null;
+  });
+  return reopening;
+}
+
+/** Keeps (or drops) this computer's copy of the keys, per the user's setting. */
+async function rememberIfWanted() {
+  const s = await session.get();
+  if (!(await settings()).rememberDevice || s.status !== "unlocked") return;
+  if (!s.userId || !s.vaultId || !s.vaultKey) return;
+  await remembered
+    .save({
+      userId: s.userId,
+      vaultId: s.vaultId,
+      vaultKey: s.vaultKey,
+      privateKey: s.privateKey ?? null,
+    })
+    .catch(() => undefined);
 }
 
 /** Remembers the signed-in account across restarts (never a key). */
@@ -269,11 +327,14 @@ async function openVault(stretchedKey: Uint8Array<ArrayBuffer>, keys: VaultKeys)
   pk?.fill(0);
   await persistSignIn();
   await scheduleLock();
+  await rememberIfWanted();
   // An app tab that is locked can open from here now.
   for (const t of await appTabs()) if (t.id !== undefined) await pingApp(t.id);
 }
 
 async function lockLocally() {
+  // Locked means locked on this computer too: the next start asks again.
+  await remembered.clear();
   await session.clear(["vaultKey", "privateKey", "stretchedKey", "pending", "recentUsername"]);
   const { token } = await session.get();
   await session.set({ status: token ? "locked" : "signed-out" });
@@ -283,6 +344,7 @@ async function lockLocally() {
 
 async function signOutLocally() {
   await persisted.clear();
+  await remembered.clear();
   await chrome.storage.session.clear();
   await session.set({ status: "signed-out" });
   await chrome.alarms.clear(LOCK_ALARM);
@@ -312,7 +374,8 @@ async function checkAutoLock() {
   // "Stay unlocked while the browser is open" (the default): no idle lock, and
   // the server's unlock window is kept open for as long as the browser runs.
   // The vault key still lives in memory only, so closing the browser locks.
-  if (minutes > 0 && (await settings()).lockMode !== "idle") {
+  const prefs = await settings();
+  if (minutes > 0 && (prefs.lockMode !== "idle" || prefs.rememberDevice)) {
     await session.set({ lastTick: now, lastActivity: now });
     await api("/vault/heartbeat", { method: "POST" }).catch(() => undefined);
     return;
@@ -542,13 +605,49 @@ async function recordUsage(o: OpenedItem, action: string, field?: string) {
 }
 
 /** Personal and workspace logins for a host. Workspace ones are skipped if unavailable. */
-async function matchAll(host: string): Promise<ListedItem[]> {
+async function matchOne(host: string): Promise<ListedItem[]> {
   const [mine, team, shared] = await Promise.all([
     api<VaultItemSummary[]>("/vault/items/match", { query: { host } }),
     api<ListedItem[]>("/workspaces/items/match", { query: { host } }).catch(() => []),
     api<SharedWithMeItem[]>("/shared/match", { query: { host } }).catch(() => []),
   ]);
   return [...mine, ...team, ...listShared(shared)];
+}
+
+/**
+ * Logins for a host, including the other domains of the same sign-in system
+ * (a gmail.com login on accounts.google.com). The page's own site first.
+ */
+async function matchAll(host: string): Promise<ListedItem[]> {
+  const domain = registrableDomain(host);
+  const others = equivalentDomains(domain).filter((d) => d !== domain);
+  const lists = await Promise.all([
+    matchOne(host),
+    ...others.map((d) => matchOne(d).catch(() => [] as ListedItem[])),
+  ]);
+  const seen = new Set<string>();
+  return lists.flat().filter((i) => !seen.has(i.id) && !!seen.add(i.id));
+}
+
+/**
+ * Personal logins saved without a website whose name points at this site
+ * ("Gmail", "GSuite access" on accounts.google.com). Offered, never filled
+ * without the user confirming; filling one remembers the site on it.
+ */
+async function unlinkedFor(host: string): Promise<ListedItem[]> {
+  const words = siteKeywords(host);
+  const pages = await Promise.all(
+    words.map((q) =>
+      api<Page<VaultItemSummary>>("/vault/items", { query: { q, limit: "10" } })
+        .then((p) => p.items)
+        .catch(() => [] as VaultItemSummary[]),
+    ),
+  );
+  const seen = new Set<string>();
+  return pages
+    .flat()
+    .filter((i) => !i.host && isFillable(i) && !seen.has(i.id) && !!seen.add(i.id))
+    .slice(0, 8);
 }
 
 /** Something with a password to fill: logins, and anything else whose password is scored. */
@@ -561,6 +660,8 @@ const isFillable = (i: ListedItem) => i.type === "LOGIN" || i.passwordStrength !
 async function fillTab(
   tabId: number,
   ref: { itemId: string; workspaceId?: string; shared?: boolean },
+  /** The user confirmed filling a login saved without a website here: remember the site on it. */
+  link = false,
 ) {
   const tab = await chrome.tabs.get(tabId);
   const pageUrl = tab.url ?? "";
@@ -571,13 +672,25 @@ async function fillTab(
   // Only fill a page whose site matches the item (public-suffix aware,
   // compared in punycode), and never an https login into an http page.
   // A look-alike or phishing domain gets nothing.
-  if (!canFill(savedUrl, item.host, pageUrl)) {
+  // A login with no website at all may be filled only when the user picked it
+  // and confirmed it for this page; one saved for another site never is.
+  const unlinked = link && !item.host && !savedUrl && !ref.workspaceId && !ref.shared;
+  if (!unlinked && !canFill(savedUrl, item.host, pageUrl)) {
     opened.key.fill(0);
     throw new Error(`This login is for ${item.host ?? "another site"}, not ${host ?? "this page"}`);
+  }
+  if (unlinked && !/^https:/.test(pageUrl) && host !== "localhost" && host !== "127.0.0.1") {
+    opened.key.fill(0);
+    throw new Error("Minions fills a login saved without a website on secure (https) pages only");
   }
   const username =
     (await decryptField(opened, "username")) ?? (await decryptField(opened, "email")) ?? "";
   const password = (await decryptField(opened, "password")) ?? "";
+  if (unlinked) {
+    // Remembered on the login, so the next visit finds it like any other.
+    const url = { key: "url", value: new URL(pageUrl).origin, sensitive: false };
+    await writeItem(opened, [...storedFields(item), url], password).catch(() => undefined);
+  }
   opened.key.fill(0);
   const msg: FillMessage = {
     type: "minions-fill",
@@ -779,6 +892,7 @@ async function handle(req: Request, sender: chrome.runtime.MessageSender): Promi
 
   switch (req.type) {
     case "state": {
+      if ((await getStatus()) === "locked") await reopenRemembered();
       const s = await session.get();
       const status = await getStatus();
       const s2 = await session.get();
@@ -792,6 +906,11 @@ async function handle(req: Request, sender: chrome.runtime.MessageSender): Promi
       } satisfies StateResponse;
     }
     case "activity":
+      return null;
+    case "rememberDevice":
+      // The popup changed the switch: keep the keys now, or drop them.
+      if (req.on) await rememberIfWanted();
+      else await remembered.clear();
       return null;
     case "login": {
       const { kdf } = await api<{ kdf: VaultKeys["kdf"] }>("/auth/prelogin", {
@@ -872,7 +991,13 @@ async function handle(req: Request, sender: chrome.runtime.MessageSender): Promi
       // The page's own site only, as the browser reports it.
       const status = await getStatus();
       const prefs = await settings();
-      const base = { status, host: senderHost, items: [], emails: [] as string[] };
+      const base = {
+        status,
+        host: senderHost,
+        items: [],
+        suggested: [] as InlineItem[],
+        emails: [] as string[],
+      };
       if (prefs.inlineMenu === false) return { ...base, enabled: false } satisfies InlineMatch;
       const account =
         status === "locked" || status === "unlocked" ? (await session.get()).email : "";
@@ -892,7 +1017,20 @@ async function handle(req: Request, sender: chrome.runtime.MessageSender): Promi
           ...(i.shared ? { shared: true } : {}),
         }),
       );
-      return { ...base, enabled: true, emails, items } satisfies InlineMatch;
+      // Nothing saved for this site: logins saved without a website that look like it.
+      const suggested = items.length
+        ? []
+        : (await unlinkedFor(senderHost).catch(() => [] as ListedItem[])).map(
+            (i): InlineItem => ({
+              id: i.id,
+              name: i.name,
+              username: i.username,
+              badge: null,
+              hasTotp: i.hasTotp,
+              unlinked: true,
+            }),
+          );
+      return { ...base, enabled: true, emails, items, suggested } satisfies InlineMatch;
     }
     case "inlineGenerate":
       return generatePassword(await generatorOptions());
@@ -919,7 +1057,7 @@ async function handle(req: Request, sender: chrome.runtime.MessageSender): Promi
     case "inlineFill":
       // Into the tab that asked; fillTab still checks its address against the item.
       await session.set({ lastActivity: Date.now() });
-      await fillTab(sender.tab!.id!, req);
+      await fillTab(sender.tab!.id!, req, !!req.link);
       return null;
     case "usernameSeen": {
       if ((await session.get()).status !== "unlocked" || !senderHost || !req.username) return null;
@@ -1352,6 +1490,7 @@ async function bridgeLink(req: Extract<Request, { type: "bridgeLink" }>) {
   });
   await persistSignIn();
   await scheduleLock();
+  await rememberIfWanted();
   stateChanged();
   return "linked";
 }

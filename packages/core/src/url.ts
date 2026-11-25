@@ -41,6 +41,67 @@ export function registrableDomain(host: string): string | null {
   return getDomain(host, { allowPrivateDomains: true }) ?? null;
 }
 
+/**
+ * Sites that share one account under different domains: a Gmail login is
+ * for accounts.google.com too. Each group is one sign-in system, run by one
+ * company; nothing here crosses companies.
+ */
+const EQUIVALENT_DOMAINS: readonly (readonly string[])[] = [
+  ["google.com", "gmail.com", "googlemail.com", "youtube.com", "google.co.uk", "google.co.in"],
+  ["apple.com", "icloud.com", "me.com"],
+  [
+    "microsoft.com",
+    "microsoftonline.com",
+    "live.com",
+    "outlook.com",
+    "hotmail.com",
+    "office.com",
+    "office365.com",
+    "msn.com",
+    "skype.com",
+    "xbox.com",
+    "azure.com",
+    "bing.com",
+  ],
+  ["amazon.com", "amazon.co.uk", "amazon.de", "amazon.in", "amazon.ca", "amazon.com.au"],
+  ["facebook.com", "messenger.com"],
+  ["atlassian.com", "atlassian.net", "bitbucket.org", "trello.com"],
+  ["paypal.com", "paypal.me"],
+  ["yahoo.com", "aol.com"],
+];
+
+/** The registrable domains that share an account with this one, itself first. */
+export function equivalentDomains(domain: string | null): string[] {
+  if (!domain) return [];
+  const group = EQUIVALENT_DOMAINS.find((g) => g.includes(domain));
+  return group ? [domain, ...group.filter((d) => d !== domain)] : [domain];
+}
+
+/** Other names a site's logins are often saved under (without a website). */
+const SITE_NAMES: Record<string, readonly string[]> = {
+  "google.com": ["google", "gmail", "gsuite", "g suite", "workspace", "youtube"],
+  "apple.com": ["apple", "icloud"],
+  "microsoft.com": ["microsoft", "outlook", "office", "hotmail", "azure"],
+  "facebook.com": ["facebook", "meta"],
+  "atlassian.com": ["atlassian", "jira", "confluence", "bitbucket", "trello"],
+};
+
+/**
+ * Words to look for in the names of logins saved without a website, for a
+ * page on this host: "accounts.google.com" → google, gmail, gsuite…
+ */
+export function siteKeywords(host: string | null): string[] {
+  const domain = host ? registrableDomain(host) : null;
+  if (!domain || isIpOrLocal(domain)) return [];
+  const words = new Set<string>();
+  for (const d of equivalentDomains(domain)) {
+    const label = d.split(".")[0];
+    if (label && label.length >= 3) words.add(label);
+    for (const w of SITE_NAMES[d] ?? []) words.add(w);
+  }
+  return [...words];
+}
+
 export type HostMatch = "exact" | "domain" | null;
 
 /**
@@ -56,7 +117,10 @@ export function matchHost(savedHost: string | null, pageHost: string | null): Ho
   if (savedHost === pageHost) return "exact";
   if (isIpOrLocal(savedHost) || isIpOrLocal(pageHost)) return null;
   const saved = registrableDomain(savedHost);
-  return saved !== null && saved === registrableDomain(pageHost) ? "domain" : null;
+  const page = registrableDomain(pageHost);
+  if (saved === null || page === null) return null;
+  // Same site, or one sign-in system under several domains (gmail.com ↔ google.com).
+  return saved === page || equivalentDomains(page).includes(saved) ? "domain" : null;
 }
 
 /**

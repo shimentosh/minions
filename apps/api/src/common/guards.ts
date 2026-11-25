@@ -7,6 +7,7 @@ import {
   UnauthorizedException,
 } from "@nestjs/common";
 import { Reflector } from "@nestjs/core";
+import { loadConfig } from "../config";
 import {
   ALLOW_PENDING_2FA,
   AuthedRequest,
@@ -75,7 +76,18 @@ export class SessionGuard implements CanActivate {
     if (!vaultId) throw new UnauthorizedException();
 
     if (now.getTime() - session.lastActiveAt.getTime() > TOUCH_INTERVAL_MS) {
-      await this.prisma.session.update({ where: { id: session.id }, data: { lastActiveAt: now } });
+      // A bearer session (extension, desktop) in use keeps going: past half its
+      // lifetime it is renewed, so a device used every day never signs out.
+      // Cookie sessions end with their cookie, so they are left as they are.
+      const ttl = loadConfig().session.ttlDays * 86_400_000;
+      const renew =
+        !!bearer &&
+        session.state === "ACTIVE" &&
+        session.expiresAt.getTime() - now.getTime() < ttl / 2;
+      await this.prisma.session.update({
+        where: { id: session.id },
+        data: { lastActiveAt: now, ...(renew ? { expiresAt: new Date(now.getTime() + ttl) } : {}) },
+      });
       if (session.deviceId) {
         await this.prisma.device.update({
           where: { id: session.deviceId },

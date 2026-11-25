@@ -334,6 +334,10 @@ const MENU_CSS = `
   .list{padding:0 4px 4px;max-height:280px;overflow:auto}
   .item{all:unset;box-sizing:border-box;display:flex;align-items:center;gap:10px;width:100%;padding:7px 8px;border-radius:9px;cursor:pointer}
   .item[hidden]{display:none}
+  .group{padding:8px 8px 4px;font-size:10.5px;font-weight:600;letter-spacing:.05em;text-transform:uppercase;color:var(--muted)}
+  .item.ask{background:var(--hover)}
+  .item.ask .go{opacity:1;color:var(--on-primary);background:var(--primary);border-radius:6px;padding:3px 8px;font-weight:600}
+  .item.ask .sub{color:var(--fg);white-space:normal}
   .item:hover,.item.on{background:var(--hover)}
   .meta{flex:1;min-width:0;display:flex;flex-direction:column}
   .name{font-weight:550;font-size:13px}
@@ -370,6 +374,8 @@ interface Row {
   match: string | null;
   /** Fills the page; resolves to an error to show, or null. */
   run: () => Promise<string | null>;
+  /** A small heading shown above this row (the start of a group). */
+  heading?: string;
 }
 
 interface Menu {
@@ -461,10 +467,14 @@ function showMenuMessage(m: Menu, text: string) {
   placeMenu();
 }
 
+/** A row's answer meaning "stay open" (it is asking the user to confirm). */
+const KEEP = "\u0000keep";
+
 async function choose(row: Row) {
   const m = menu;
   if (!m) return;
   const error = await row.run();
+  if (error === KEEP) return;
   if (error) showMenuMessage(m, error);
   else closeMenu();
 }
@@ -519,32 +529,75 @@ function fillCode(anchor: HTMLInputElement, code: string) {
 /** The field a login fill from the menu goes to (read by the fill handler). */
 let fillAnchor: HTMLInputElement | null = null;
 
-function rowsFor(m: Menu, data: InlineMatch): Row[] {
-  const anchor = m.anchor;
-  const ref = (it: InlineItem) => ({
+function itemRef(it: InlineItem) {
+  return {
     itemId: it.id,
     ...(it.workspaceId ? { workspaceId: it.workspaceId } : {}),
     ...(it.shared ? { shared: true } : {}),
-  });
+  };
+}
+
+function loginRow(it: InlineItem, anchor: HTMLInputElement): Row {
+  const row = rowButton(letterIcon(it.name), it.name, it.username, [
+    it.badge ? el("span", "badge trunc", it.badge) : null,
+    el("span", "go", "Fill"),
+  ]);
+  row.title = `Fill ${it.username || it.name}`;
+  return {
+    el: row,
+    match: `${it.username ?? ""} ${it.name}`.toLowerCase(),
+    run: async () => {
+      fillAnchor = anchor;
+      const r = await call({ type: "inlineFill", ...itemRef(it) });
+      fillAnchor = null;
+      return r?.ok ? null : (r?.error ?? "Minions did not answer. Reload the page.");
+    },
+  };
+}
+
+/** A login saved without a website: the first click asks, the second fills and remembers. */
+function unlinkedRow(it: InlineItem, anchor: HTMLInputElement, host: string | null): Row {
+  const go = el("span", "go", "Fill");
+  const row = rowButton(letterIcon(it.name), it.name, it.username ?? "No website saved", [
+    el("span", "badge", "No website"),
+    go,
+  ]);
+  row.title = `Fill ${it.username || it.name}`;
+  let asked = false;
+  return {
+    el: row,
+    match: `${it.username ?? ""} ${it.name}`.toLowerCase(),
+    run: async () => {
+      if (!asked) {
+        asked = true;
+        row.classList.add("ask");
+        const sub = row.querySelector(".meta")?.lastElementChild;
+        if (sub) sub.textContent = `Fill here and remember ${host ?? "this site"} on it?`;
+        go.textContent = "Confirm";
+        return KEEP;
+      }
+      fillAnchor = anchor;
+      const r = await call({ type: "inlineFill", ...itemRef(it), link: true });
+      fillAnchor = null;
+      matchCache = null;
+      return r?.ok ? null : (r?.error ?? "Minions did not answer. Reload the page.");
+    },
+  };
+}
+
+function rowsFor(m: Menu, data: InlineMatch): Row[] {
+  const anchor = m.anchor;
+  const ref = itemRef;
 
   if (m.kind === "login")
-    return data.items.map((it) => {
-      const row = rowButton(letterIcon(it.name), it.name, it.username, [
-        it.badge ? el("span", "badge trunc", it.badge) : null,
-        el("span", "go", "Fill"),
-      ]);
-      row.title = `Fill ${it.username || it.name}`;
-      return {
-        el: row,
-        match: `${it.username ?? ""} ${it.name}`.toLowerCase(),
-        run: async () => {
-          fillAnchor = anchor;
-          const r = await call({ type: "inlineFill", ...ref(it) });
-          fillAnchor = null;
-          return r?.ok ? null : (r?.error ?? "Minions did not answer. Reload the page.");
-        },
-      };
-    });
+    return [
+      ...data.items.map((it) => loginRow(it, anchor)),
+      // Saved without a website, but named like this site: offered, confirmed, then remembered.
+      ...data.suggested.map((it, n) => ({
+        ...unlinkedRow(it, anchor, data.host),
+        ...(n === 0 ? { heading: "Saved without a website" } : {}),
+      })),
+    ];
 
   if (m.kind === "otp")
     return data.items
@@ -665,7 +718,7 @@ function buildMenu(anchor: HTMLInputElement, kind: FieldKind, data: InlineMatch)
   const needsVault = kind === "login" || kind === "otp";
   if (kind === "signup-email" && !data.emails.length) return null;
   if (kind === "otp" && unlocked && !data.items.some((i) => i.hasTotp)) return null;
-  const emptyLogin = kind === "login" && unlocked && !data.items.length;
+  const emptyLogin = kind === "login" && unlocked && !data.items.length && !data.suggested.length;
   const showNote = (needsVault && !unlocked) || emptyLogin;
   if (showNote && (noteShown || (kind === "otp" && !unlocked))) return null;
 
@@ -709,6 +762,7 @@ function buildMenu(anchor: HTMLInputElement, kind: FieldKind, data: InlineMatch)
     m.shown = [...m.rows];
     const list = el("div", "list");
     for (const r of m.rows) {
+      if (r.heading) list.append(el("div", "group", r.heading));
       r.el.addEventListener("click", (e) => {
         // A page script cannot press these for the user: synthetic clicks are ignored.
         if (e.isTrusted) void choose(r);
@@ -824,6 +878,178 @@ if (!ON_APP) {
     },
     true,
   );
+}
+
+// ─── The Minions button inside a field ───────────────────────────────────────
+// A small logo at the right edge of a login, sign-up or 2FA field (focused or
+// hovered). Clicking it opens the menu, even after the menu was closed.
+
+const ICON_CSS = `
+  :host{all:initial}
+  button{all:unset;box-sizing:border-box;position:relative;display:block;width:22px;height:22px;border-radius:6px;cursor:pointer;
+    box-shadow:0 0 0 1px rgba(0,0,0,.08),0 1px 3px rgba(0,0,0,.18);transition:transform .12s ease,opacity .12s ease;opacity:.92;animation:in .14s ease-out}
+  button:hover{transform:scale(1.08);opacity:1}
+  button:focus-visible{outline:2px solid rgba(99,102,241,.6);outline-offset:2px}
+  @keyframes in{from{opacity:0;transform:scale(.8)}}
+  svg{display:block;width:100%;height:100%;border-radius:6px}
+  .n{position:absolute;top:-5px;right:-6px;min-width:14px;height:14px;padding:0 3px;box-sizing:border-box;border-radius:999px;
+    background:#10b981;color:#fff;font:700 9px/14px ui-sans-serif,system-ui,sans-serif;text-align:center;box-shadow:0 0 0 1.5px #fff}
+  @media (prefers-reduced-motion:reduce){button{animation:none;transition:none}}
+`;
+
+interface FieldIcon {
+  host: HTMLElement;
+  button: HTMLButtonElement;
+  count: HTMLElement;
+  field: HTMLInputElement | null;
+  kind: FieldKind | null;
+}
+let fieldIcon: FieldIcon | null = null;
+let iconHideTimer = 0;
+
+function ensureIcon(): FieldIcon {
+  if (fieldIcon?.host.isConnected) return fieldIcon;
+  const host = document.createElement("div");
+  host.id = "minions-field-icon";
+  host.style.cssText = "position:fixed;z-index:2147483646;top:0;left:0;display:none;";
+  const root = host.attachShadow({ mode: "closed" });
+  const button = document.createElement("button");
+  button.type = "button";
+  button.title = "Minions";
+  button.setAttribute("aria-label", "Minions: fill this field");
+  button.innerHTML = LOGO_SVG;
+  const count = el("span", "n");
+  count.hidden = true;
+  button.append(count);
+  const style = document.createElement("style");
+  style.textContent = ICON_CSS;
+  root.append(style, button);
+  // Keep the focus in the field when the button is pressed.
+  host.addEventListener("mousedown", (e) => e.preventDefault());
+  button.addEventListener("click", (e) => {
+    if (!e.isTrusted || !fieldIcon?.field || !fieldIcon.kind) return;
+    const { field, kind } = fieldIcon;
+    // Asked for by the user: shown even if closed before or already noted.
+    menuDismissed = false;
+    noteShown = false;
+    closeMenu();
+    if (document.activeElement !== field) field.focus({ preventScroll: true });
+    void openMenu(field, kind);
+  });
+  host.addEventListener("mouseenter", () => window.clearTimeout(iconHideTimer));
+  host.addEventListener("mouseleave", () => scheduleIconHide());
+  document.documentElement.appendChild(host);
+  fieldIcon = { host, button, count, field: null, kind: null };
+  return fieldIcon;
+}
+
+/**
+ * Where the button goes: inside the field's right edge, moved left past
+ * anything the site already put there (a show-password eye, a clear button).
+ */
+function placeIcon() {
+  const icon = fieldIcon;
+  const field = icon?.field;
+  if (!icon || !field) return;
+  const r = field.getBoundingClientRect();
+  if (!field.isConnected || r.width < 80 || r.height < 18 || r.bottom < 0 || r.top > innerHeight)
+    return hideIcon();
+  const size = 22;
+  const top = r.top + (r.height - size) / 2;
+  icon.host.style.display = "none";
+  let right = r.right - 8;
+  for (let i = 0; i < 3; i++) {
+    const hit = document.elementFromPoint(right - size / 2, r.top + r.height / 2);
+    if (!hit || hit === field || hit.contains(field) || field.contains(hit)) break;
+    right -= size + 8;
+  }
+  icon.host.style.display = "block";
+  icon.host.style.transform = `translate(${Math.round(right - size)}px, ${Math.round(top)}px)`;
+}
+
+function hideIcon() {
+  window.clearTimeout(iconHideTimer);
+  if (fieldIcon) {
+    fieldIcon.host.style.display = "none";
+    fieldIcon.field = null;
+  }
+}
+
+function scheduleIconHide() {
+  window.clearTimeout(iconHideTimer);
+  iconHideTimer = window.setTimeout(() => {
+    const f = fieldIcon?.field;
+    if (f && document.activeElement === f) return;
+    hideIcon();
+  }, 350);
+}
+
+async function showIcon(field: HTMLInputElement, kind: FieldKind) {
+  window.clearTimeout(iconHideTimer);
+  if (fieldIcon?.field === field) return placeIcon();
+  const data = await inlineMatch();
+  if (!data?.enabled || data.status === "signed-out") return;
+  if (kind === "signup-email" && !data.emails.length) return;
+  const icon = ensureIcon();
+  icon.field = field;
+  icon.kind = kind;
+  // How many saved logins this site has, on sign-in fields.
+  const n = kind === "login" && data.status === "unlocked" ? data.items.length : 0;
+  icon.count.hidden = n === 0;
+  icon.count.textContent = n > 9 ? "9+" : String(n);
+  icon.button.title =
+    kind === "new-password"
+      ? "Minions: suggest a strong password"
+      : kind === "otp"
+        ? "Minions: fill the 2FA code"
+        : kind === "signup-email"
+          ? "Minions: fill your email"
+          : data.status === "locked"
+            ? "Minions is locked: click to unlock"
+            : n
+              ? `Minions: ${n} saved login${n === 1 ? "" : "s"} for this site`
+              : "Minions";
+  placeIcon();
+}
+
+if (!ON_APP) {
+  const iconFor = (t: EventTarget | null) => {
+    const kind = classify(t);
+    if (kind) void showIcon(t as HTMLInputElement, kind);
+  };
+  document.addEventListener("focusin", (e) => iconFor(e.target), true);
+  document.addEventListener(
+    "focusout",
+    (e) => {
+      if (e.target === fieldIcon?.field) scheduleIconHide();
+    },
+    true,
+  );
+  document.addEventListener(
+    "mouseover",
+    (e) => {
+      if (e.target instanceof HTMLInputElement) iconFor(e.target);
+    },
+    { capture: true, passive: true },
+  );
+  document.addEventListener(
+    "mouseout",
+    (e) => {
+      if (e.target === fieldIcon?.field && document.activeElement !== e.target) scheduleIconHide();
+    },
+    { capture: true, passive: true },
+  );
+  let iconFrame = 0;
+  const follow = () => {
+    if (!fieldIcon?.field || iconFrame) return;
+    iconFrame = requestAnimationFrame(() => {
+      iconFrame = 0;
+      placeIcon();
+    });
+  };
+  addEventListener("scroll", follow, { capture: true, passive: true });
+  addEventListener("resize", follow, { passive: true });
+  if (document.activeElement) iconFor(document.activeElement);
 }
 
 // ─── Fill requests from the background ───────────────────────────────────────

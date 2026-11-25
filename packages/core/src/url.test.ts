@@ -1,5 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { canFill, matchHost, normalizeHost, registrableDomain } from "./url";
+import {
+  canFill,
+  equivalentDomains,
+  matchHost,
+  normalizeHost,
+  registrableDomain,
+  siteKeywords,
+} from "./url";
 
 describe("registrableDomain", () => {
   it("uses the public suffix list, not the last two labels", () => {
@@ -94,5 +101,33 @@ describe("canFill", () => {
     expect(canFill("https://github.com", "github.com", "https://github.com.evil.io")).toBe(false);
     expect(canFill("https://github.com", "github.com", "ftp://github.com")).toBe(false);
     expect(canFill("https://github.com", "github.com", "not a url")).toBe(false);
+  });
+});
+
+describe("one sign-in system under several domains", () => {
+  it("fills a Gmail login on Google's sign-in page", () => {
+    expect(matchHost("gmail.com", "accounts.google.com")).toBe("domain");
+    expect(matchHost("mail.google.com", "accounts.youtube.com")).toBe("domain");
+    expect(canFill("https://gmail.com", "gmail.com", "https://accounts.google.com/signin")).toBe(
+      true,
+    );
+    expect(matchHost("live.com", "login.microsoftonline.com")).toBe("domain");
+  });
+
+  it("never crosses companies or matches look-alikes", () => {
+    expect(matchHost("gmail.com", "icloud.com")).toBeNull();
+    expect(matchHost("google.com", "google-login.com")).toBeNull();
+    expect(matchHost("gmail.com", "gmail.com.evil.io")).toBeNull();
+    expect(canFill("https://gmail.com", "gmail.com", "http://accounts.google.com")).toBe(false);
+  });
+
+  it("lists the names a site's logins are saved under", () => {
+    expect(equivalentDomains("gmail.com")[0]).toBe("gmail.com");
+    expect(equivalentDomains("gmail.com")).toContain("google.com");
+    expect(equivalentDomains("example.com")).toEqual(["example.com"]);
+    const words = siteKeywords("accounts.google.com");
+    expect(words).toEqual(expect.arrayContaining(["google", "gmail", "gsuite"]));
+    expect(siteKeywords("app.upbase.io")).toEqual(["upbase"]);
+    expect(siteKeywords("localhost")).toEqual([]);
   });
 });

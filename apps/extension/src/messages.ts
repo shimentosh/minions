@@ -119,6 +119,8 @@ export interface InlineItem {
   /** Where a team or shared login comes from. */
   badge: string | null;
   hasTotp: boolean;
+  /** Saved without a website: offered by name, filled only after the user confirms. */
+  unlinked?: boolean;
   workspaceId?: string;
   shared?: boolean;
 }
@@ -131,6 +133,8 @@ export interface InlineMatch {
   /** The page's site, as the browser reports it. */
   host: string | null;
   items: InlineItem[];
+  /** When nothing matches: logins saved without a website whose name fits this site. */
+  suggested: InlineItem[];
   /** For sign-up forms: the user's chosen sign-up email, then their account email. */
   emails: string[];
 }
@@ -152,6 +156,12 @@ export interface Settings {
   offerSave?: boolean;
   /** Save new logins (and deliberate password changes) without asking, with an Undo. */
   autoSave?: boolean;
+  /**
+   * Keep the vault keys on this computer, encrypted in the extension, so it
+   * opens again after the browser restarts. Off by default; lock or sign out
+   * deletes them.
+   */
+  rememberDevice?: boolean;
   /**
    * "browser" (default): once unlocked, stay unlocked until the browser closes.
    * "idle": lock after the account's auto-lock time away from the computer.
@@ -201,7 +211,14 @@ export type Request =
   /** The logins for the sender page's site (taken from the browser, not the page). */
   | { type: "inlineMatch" }
   /** The user picked a login in the page's menu: fill it into that same tab. */
-  | { type: "inlineFill"; itemId: string; workspaceId?: string; shared?: boolean }
+  | {
+      type: "inlineFill";
+      itemId: string;
+      workspaceId?: string;
+      shared?: boolean;
+      /** A login saved without a website, confirmed for this page: fill it and remember the site. */
+      link?: boolean;
+    }
   /** Step one of a two-step sign-in: the username, remembered briefly for the password step. */
   | { type: "usernameSeen"; username: string }
   /** A strong password for a sign-up or change-password field, from the user's generator settings. */
@@ -220,6 +237,8 @@ export type Request =
   /** The page's menu asks the user to unlock: open the toolbar popup. */
   | { type: "openPopup" }
   | { type: "activity" }
+  /** The "Remember on this computer" switch changed: keep or drop the keys now. */
+  | { type: "rememberDevice"; on: boolean }
   // From the content script on the Minions web app's own origin only.
   | { type: "bridgeHello" }
   /** The app is locked: the keys this extension holds, for the same account. */
@@ -270,7 +289,12 @@ export function isValidRequest(msg: unknown): msg is Request {
     case "openPopup":
       return true;
     case "inlineFill":
-      return uuid(m.itemId) && optionalId(m.workspaceId) && optionalBool(m.shared);
+      return (
+        uuid(m.itemId) &&
+        optionalId(m.workspaceId) &&
+        optionalBool(m.shared) &&
+        optionalBool(m.link)
+      );
     case "inlineTotp":
       return (
         uuid(m.itemId) &&
@@ -284,6 +308,8 @@ export function isValidRequest(msg: unknown): msg is Request {
       return str(m.username, 256);
     case "connect":
       return optionalBool(m.silent);
+    case "rememberDevice":
+      return typeof m.on === "boolean";
     case "browse":
       return m.view === "favorites" || m.view === "recent";
     case "login":
