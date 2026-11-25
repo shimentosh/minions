@@ -52,6 +52,8 @@ import {
 import {
   type BridgeHello,
   type FillMessage,
+  type InlineItem,
+  type InlineMatch,
   type ItemView,
   isValidRequest,
   type ListedItem,
@@ -76,6 +78,12 @@ const PENDING_TTL_MS = 5 * 60_000;
 const CONNECT_TTL_MS = 10 * 60_000;
 const WEB_ORIGIN = new URL(__WEB_URL__).origin;
 const NEVER_SAVE_LIMIT = 500;
+/** Input on the computer within this many seconds counts as the user being here. */
+const ACTIVE_WITHIN_SECONDS = 60;
+/** A gap this long between lock checks means the computer slept: that time counts as idle. */
+const SLEPT_AFTER_MS = 3 * 60_000;
+/** How long a username from step one of a two-step sign-in is kept for the password step. */
+const USERNAME_TTL_MS = 5 * 60_000;
 
 interface SessionData {
   token?: string;
@@ -91,7 +99,11 @@ interface SessionData {
   stretchedKey?: string;
   autoLockMinutes?: number;
   lastActivity?: number;
+  /** When the auto-lock check last ran, to notice the computer sleeping. */
+  lastTick?: number;
   pending?: PendingSave & { password: string; createdAt: number };
+  /** Step one of a two-step sign-in on this host (memory only, never a password). */
+  recentUsername?: { host: string; username: string; at: number };
   /** The user asked to sign in through the web app; it may ask them to approve until then. */
   wantsConnectUntil?: number;
   /** One-time nonces handed to the web app; a link must carry one. */
@@ -238,7 +250,7 @@ async function openVault(stretchedKey: Uint8Array<ArrayBuffer>, keys: VaultKeys)
 }
 
 async function lockLocally() {
-  await session.clear(["vaultKey", "privateKey", "stretchedKey", "pending"]);
+  await session.clear(["vaultKey", "privateKey", "stretchedKey", "pending", "recentUsername"]);
   const { token } = await session.get();
   await session.set({ status: token ? "locked" : "signed-out" });
   await chrome.alarms.clear(LOCK_ALARM);
@@ -253,9 +265,38 @@ async function signOutLocally() {
 }
 
 async function scheduleLock() {
-  const { autoLockMinutes = 15 } = await session.get();
+  await session.set({ lastTick: Date.now() });
   await chrome.alarms.create(LOCK_ALARM, { periodInMinutes: 1 });
-  if (autoLockMinutes === 0) await chrome.alarms.create(LOCK_ALARM, { delayInMinutes: 1 });
+}
+
+/**
+ * Auto-lock after the user's idle time, where idle means away from the
+ * computer, not merely not using this popup: someone browsing and signing in
+ * to sites stays unlocked. While they are active the server's unlock window
+ * is kept in step, or it would lock the session on its own. "Immediately" (0)
+ * still means a minute after the popup was last used. Time the computer
+ * spent asleep counts as idle, however active the user is on waking.
+ */
+async function checkAutoLock() {
+  const s = await session.get();
+  if (s.status !== "unlocked") {
+    await chrome.alarms.clear(LOCK_ALARM);
+    return;
+  }
+  const now = Date.now();
+  const minutes = s.autoLockMinutes ?? 15;
+  const awake = now - (s.lastTick ?? now) < SLEPT_AFTER_MS;
+  let last = s.lastActivity ?? 0;
+  const active =
+    minutes > 0 && awake && (await chrome.idle.queryState(ACTIVE_WITHIN_SECONDS)) === "active";
+  if (active) last = now;
+  await session.set({ lastTick: now, lastActivity: last });
+  if (now - last > Math.max(minutes, 1) * 60_000) {
+    await api("/vault/lock", { method: "POST" }).catch(() => undefined);
+    await lockLocally();
+    return;
+  }
+  if (active) await api("/vault/heartbeat", { method: "POST" }).catch(() => undefined);
 }
 
 chrome.alarms.onAlarm.addListener(async (alarm) => {
@@ -263,12 +304,7 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
     await clearClipboard().catch(() => undefined);
     return;
   }
-  if (alarm.name !== LOCK_ALARM) return;
-  const { lastActivity = 0, autoLockMinutes = 15, status } = await session.get();
-  if (status === "unlocked" && Date.now() - lastActivity > Math.max(autoLockMinutes, 1) * 60_000) {
-    await api("/vault/lock", { method: "POST" }).catch(() => undefined);
-    await lockLocally();
-  }
+  if (alarm.name === LOCK_ALARM) await checkAutoLock();
 });
 
 async function getStatus(): Promise<Status> {
@@ -421,6 +457,48 @@ async function matchAll(host: string): Promise<ListedItem[]> {
   return [...mine, ...team, ...listShared(shared)];
 }
 
+/** Something with a password to fill: logins, and anything else whose password is scored. */
+const isFillable = (i: ListedItem) => i.type === "LOGIN" || i.passwordStrength !== null;
+
+/**
+ * Fills one item into a tab's top frame, after checking the tab's address
+ * (as the browser reports it) is the item's site.
+ */
+async function fillTab(
+  tabId: number,
+  ref: { itemId: string; workspaceId?: string; shared?: boolean },
+) {
+  const tab = await chrome.tabs.get(tabId);
+  const pageUrl = tab.url ?? "";
+  const host = normalizeHost(pageUrl);
+  const opened = await openItem(ref.itemId, ref.workspaceId, ref.shared);
+  const { item } = opened;
+  const savedUrl = item.fields.find((f) => f.key === "url" && !f.sensitive)?.value ?? null;
+  // Only fill a page whose site matches the item (public-suffix aware,
+  // compared in punycode), and never an https login into an http page.
+  // A look-alike or phishing domain gets nothing.
+  if (!canFill(savedUrl, item.host, pageUrl)) {
+    opened.key.fill(0);
+    throw new Error(`This login is for ${item.host ?? "another site"}, not ${host ?? "this page"}`);
+  }
+  const username =
+    (await decryptField(opened, "username")) ?? (await decryptField(opened, "email")) ?? "";
+  const password = (await decryptField(opened, "password")) ?? "";
+  opened.key.fill(0);
+  const msg: FillMessage = {
+    type: "minions-fill",
+    origin: new URL(pageUrl).origin,
+    username,
+    password,
+  };
+  // Top frame only: an embedded, possibly cross-origin iframe never receives credentials.
+  const res = (await chrome.tabs.sendMessage(tabId, msg, { frameId: 0 })) as
+    | { filled?: boolean }
+    | undefined;
+  if (!res?.filled) throw new Error("No login form found on this page");
+  await recordUsage(opened, "item.autofilled");
+}
+
 async function buildLogin(
   host: string,
   url: string,
@@ -528,7 +606,15 @@ async function handle(req: Request, sender: chrome.runtime.MessageSender): Promi
     } catch {
       /* not a page */
     }
-    const allowed = ["formSubmitted", "pendingSave", "resolveSave"];
+    const allowed = [
+      "formSubmitted",
+      "pendingSave",
+      "resolveSave",
+      "inlineMatch",
+      "inlineFill",
+      "usernameSeen",
+      "openPopup",
+    ];
     if (origin === WEB_ORIGIN) allowed.push("bridgeHello", "bridgeLink");
     if (!allowed.includes(req.type)) throw new Error("Not allowed");
   } else await session.set({ lastActivity: Date.now() });
@@ -623,39 +709,43 @@ async function handle(req: Request, sender: chrome.runtime.MessageSender): Promi
       ]);
       return [...page.items, ...team, ...listShared(shared)] satisfies ListedItem[];
     }
-    case "fill": {
-      const tab = await chrome.tabs.get(req.tabId);
-      const pageUrl = tab.url ?? "";
-      const host = normalizeHost(pageUrl);
-      const opened = await openItem(req.itemId, req.workspaceId, req.shared);
-      const { item } = opened;
-      const savedUrl = item.fields.find((f) => f.key === "url" && !f.sensitive)?.value ?? null;
-      // Only fill a page whose site matches the item (public-suffix aware,
-      // compared in punycode), and never an https login into an http page.
-      // A look-alike or phishing domain gets nothing.
-      if (!canFill(savedUrl, item.host, pageUrl)) {
-        throw new Error(
-          `This login is for ${item.host ?? "another site"}, not ${host ?? "this page"}`,
-        );
-      }
-      const username =
-        (await decryptField(opened, "username")) ?? (await decryptField(opened, "email")) ?? "";
-      const password = (await decryptField(opened, "password")) ?? "";
-      opened.key.fill(0);
-      const msg: FillMessage = {
-        type: "minions-fill",
-        origin: new URL(pageUrl).origin,
-        username,
-        password,
-      };
-      // Top frame only: an embedded, possibly cross-origin iframe never receives credentials.
-      const res = (await chrome.tabs.sendMessage(req.tabId, msg, { frameId: 0 })) as
-        | { filled?: boolean }
-        | undefined;
-      if (!res?.filled) throw new Error("No login form found on this page");
-      await recordUsage(opened, "item.autofilled");
+    case "fill":
+      await fillTab(req.tabId, req);
+      return null;
+    case "inlineMatch": {
+      // The page's own site only, as the browser reports it.
+      const status = await getStatus();
+      if (status !== "unlocked" || !senderHost) return { status, items: [] } satisfies InlineMatch;
+      const items = (await matchAll(senderHost)).filter(isFillable).map(
+        (i): InlineItem => ({
+          id: i.id,
+          name: i.name,
+          username: i.username,
+          badge: i.workspaceName ?? (i.sharedBy ? `from ${i.sharedBy}` : null),
+          ...(i.workspaceId ? { workspaceId: i.workspaceId } : {}),
+          ...(i.shared ? { shared: true } : {}),
+        }),
+      );
+      return { status, items } satisfies InlineMatch;
+    }
+    case "inlineFill":
+      // Into the tab that asked; fillTab still checks its address against the item.
+      await session.set({ lastActivity: Date.now() });
+      await fillTab(sender.tab!.id!, req);
+      return null;
+    case "usernameSeen": {
+      if ((await session.get()).status !== "unlocked" || !senderHost || !req.username) return null;
+      await session.set({
+        recentUsername: { host: senderHost, username: req.username, at: Date.now() },
+      });
       return null;
     }
+    case "openPopup":
+      // Needs a focused browser window; the menu says where to click otherwise.
+      await chrome.action.openPopup().catch(() => {
+        throw new Error("Click the Minions icon in the toolbar to unlock");
+      });
+      return null;
     case "copy": {
       const opened = await openItem(req.itemId, req.workspaceId, req.shared);
       const value =
@@ -906,13 +996,19 @@ async function handle(req: Request, sender: chrome.runtime.MessageSender): Promi
       return id;
     }
     case "formSubmitted": {
-      const { status } = await session.get();
+      const { status, recentUsername } = await session.get();
       const host = senderHost;
       if (status !== "unlocked" || !host || !req.password) return null;
       if ((await neverSaveHosts()).includes(host)) return null;
+      // A password page with no username on it: take the one from step one.
+      const username =
+        req.username ||
+        (recentUsername?.host === host && Date.now() - recentUsername.at < USERNAME_TTL_MS
+          ? recentUsername.username
+          : "");
       const existing = await matchAll(host).catch(() => [] as ListedItem[]);
       const same = existing.find(
-        (i) => (i.username ?? "").toLowerCase() === req.username.toLowerCase(),
+        (i) => (i.username ?? "").toLowerCase() === username.toLowerCase(),
       );
       if (same) {
         // Known login: only offer an update if the password actually changed,
@@ -928,7 +1024,7 @@ async function handle(req: Request, sender: chrome.runtime.MessageSender): Promi
         id: crypto.randomUUID(),
         host,
         url: new URL(sender.url!).origin,
-        username: req.username,
+        username,
         password: req.password,
         createdAt: Date.now(),
         ...(same
@@ -945,7 +1041,16 @@ async function handle(req: Request, sender: chrome.runtime.MessageSender): Promi
           : {}),
       };
       await session.set({ pending });
-      await chrome.action.setBadgeText({ text: "1", tabId: sender.tab?.id });
+      await session.clear(["recentUsername"]);
+      const tabId = sender.tab?.id;
+      await chrome.action.setBadgeText({ text: "1", tabId });
+      // The page may have moved on (a sign-in usually navigates) before this
+      // was ready: tell whatever is in that tab now. It shows the prompt only
+      // if it is still the same site.
+      if (tabId !== undefined)
+        chrome.tabs
+          .sendMessage(tabId, { type: "minions-show-save" }, { frameId: 0 })
+          .catch(() => undefined);
       return null;
     }
     case "pendingSave": {

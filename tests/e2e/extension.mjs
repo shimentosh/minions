@@ -21,9 +21,23 @@ const check = (cond, msg) => {
 // A login page the content script will see.
 const page = `<!doctype html><title>Acme</title><form id=f action="/done" method=post>
 <input name=username id=u autocomplete=username><input type=password name=password id=p><button id=go>Sign in</button></form>`;
+const pages = {
+  "/done": "<!doctype html><title>Welcome</title><p>Signed in</p>",
+  // Change password: the username is in a hidden field, the new password is entered twice.
+  "/change": `<!doctype html><title>Change</title><form action="/done" method=post>
+<input type=text autocomplete=username value="wile@acme.test" hidden>
+<input type=password id=cur autocomplete=current-password>
+<input type=password id=new autocomplete=new-password>
+<input type=password id=conf autocomplete=new-password><button id=go>Change</button></form>`,
+  // Two-step sign-in: the username on one page, the password on the next.
+  "/step1": `<!doctype html><title>Step 1</title><form action="/step2" method=get>
+<input type=email name=email id=e autocomplete=username><button id=next>Next</button></form>`,
+  "/step2": `<!doctype html><title>Step 2</title><form action="/done" method=post>
+<input type=password id=p2 autocomplete=current-password><button id=go>Sign in</button></form>`,
+};
 const site = createServer((req, res) => {
   res.setHeader("content-type", "text/html");
-  res.end(req.url === "/done" ? "<!doctype html><title>Welcome</title><p>Signed in</p>" : page);
+  res.end(pages[new URL(req.url, "http://x").pathname] ?? page);
 }).listen(5199);
 
 // Register through the real web client code path is covered by smoke.mjs;
@@ -152,6 +166,88 @@ try {
       (await site2.inputValue("#p")) === "Beep-Beep-123!",
     "username and password filled into the page",
   );
+
+  const waitPending = async (cond = () => true) => {
+    let p = await msg({ type: "pendingSave" });
+    for (let i = 0; i < 25 && !(p.data && cond(p.data)); i++) {
+      await new Promise((r) => setTimeout(r, 200));
+      p = await msg({ type: "pendingSave" });
+    }
+    return p.data;
+  };
+
+  // The menu under a login field offers the saved login; picking it fills the page.
+  const site3 = await ctx.newPage();
+  await site3.goto("http://localhost:5199/login");
+  await site3.focus("#u");
+  const menuShown = await site3
+    .waitForSelector("#minions-fill-menu", { state: "attached", timeout: 5000 })
+    .then(() => true)
+    .catch(() => false);
+  check(menuShown, "a menu with the saved login opens under the login field");
+  check(
+    await site3.evaluate(() => document.getElementById("minions-fill-menu")?.shadowRoot === null),
+    "the page cannot read inside the menu",
+  );
+  await site3.keyboard.press("ArrowDown");
+  await site3.keyboard.press("Enter");
+  await site3.waitForFunction(() => document.querySelector("#p").value !== "", null, {
+    timeout: 5000,
+  });
+  check(
+    (await site3.inputValue("#u")) === "wile@acme.test" &&
+      (await site3.inputValue("#p")) === "Beep-Beep-123!" &&
+      site3.url().endsWith("/login"),
+    "picking it from the menu fills both fields without submitting",
+  );
+  await site3.close();
+
+  // Changing a password: Minions offers to update the login with the new one.
+  const change = await ctx.newPage();
+  await change.goto("http://localhost:5199/change");
+  await change.fill("#cur", "Beep-Beep-123!");
+  await change.fill("#new", "Meep-Meep-456!");
+  await change.fill("#conf", "Meep-Meep-456!");
+  await change.click("#go");
+  await change.waitForLoadState();
+  const upd = await waitPending((d) => !!d.updateItemId);
+  check(
+    upd?.updateItemId === match.data.items[0].id && upd?.username === "wile@acme.test",
+    "a password change offers to update the saved login",
+  );
+  check(
+    await change
+      .waitForSelector("#minions-save-prompt", { state: "attached", timeout: 5000 })
+      .then(() => true)
+      .catch(() => false),
+    "the save prompt appears on the page after it navigates",
+  );
+  const updated = await msg({ type: "resolveSave", id: upd.id, action: "update" });
+  check(updated.data === "updated", "updates the login after confirmation");
+  await site2.goto("http://localhost:5199/login");
+  await msg({ type: "fill", tabId, itemId: match.data.items[0].id });
+  check(
+    (await site2.inputValue("#p")) === "Meep-Meep-456!",
+    "the new password is saved, not the current one or the confirmation",
+  );
+  await change.close();
+
+  // Two-step sign-in: the username from the first page goes with the password from the second.
+  const steps = await ctx.newPage();
+  await steps.goto("http://localhost:5199/step1");
+  await steps.fill("#e", "roadrunner@acme.test");
+  await steps.click("#next");
+  await steps.waitForURL(/step2/);
+  await steps.fill("#p2", "Zoom-Zoom-789!");
+  await steps.click("#go");
+  await steps.waitForLoadState();
+  const two = await waitPending((d) => d.username === "roadrunner@acme.test");
+  check(
+    two?.username === "roadrunner@acme.test" && !two?.updateItemId,
+    "a two-step sign-in is saved with the username from step one",
+  );
+  if (two) await msg({ type: "resolveSave", id: two.id, action: "ignore" });
+  await steps.close();
 
   // Content scripts cannot use privileged messages.
   const fromPage = await site2.evaluate(

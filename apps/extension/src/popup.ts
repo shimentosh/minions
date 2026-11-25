@@ -438,6 +438,8 @@ function lockedView(state: StateResponse) {
     ),
   );
   app.classList.add("center");
+  // Ready to type: the master password and Enter is all it takes.
+  password.focus();
   // An app tab that is already unlocked reconnects this extension right away.
   void send({ type: "connect", silent: true }).catch(() => undefined);
   const poll = window.setInterval(async () => {
@@ -501,7 +503,7 @@ function showTab() {
 
 // ─── Logins ──────────────────────────────────────────────────────────────────
 
-function itemRow(item: ListedItem, canFill: boolean) {
+function itemRow(item: ListedItem, canFill: boolean, enterFills = false) {
   const actions = h("div", { class: "actions" });
   if (item.username)
     actions.append(
@@ -530,7 +532,12 @@ function itemRow(item: ListedItem, canFill: boolean) {
       ),
     );
   if (canFill && activeTab?.id !== undefined) {
-    const fill = h("button", { type: "button", class: "fill" }, "Fill");
+    const fill = h(
+      "button",
+      { type: "button", class: "fill", title: enterFills ? "Fill (Enter)" : "Fill" },
+      "Fill",
+      enterFills ? h("span", { class: "kbd" }, "↵") : null,
+    );
     const tabId = activeTab.id;
     fill.addEventListener("click", (e) => {
       e.stopPropagation();
@@ -567,9 +574,16 @@ function itemRow(item: ListedItem, canFill: boolean) {
   return row;
 }
 
-function list(items: ListedItem[], canFill: boolean) {
-  return h("div", { class: "card" }, ...items.map((i) => itemRow(i, canFill)));
+function list(items: ListedItem[], canFill: boolean, enterFillsFirst = false) {
+  return h(
+    "div",
+    { class: "card" },
+    ...items.map((i, n) => itemRow(i, canFill, enterFillsFirst && n === 0)),
+  );
 }
+
+/** Logins, and anything else with a scored password: what Fill can put into a page. */
+const fillable = (i: ListedItem) => i.type === "LOGIN" || i.passwordStrength !== null;
 
 function section(title: string, ...children: Node[]) {
   return h("div", { class: "section" }, h("div", { class: "section-title" }, title), ...children);
@@ -589,7 +603,7 @@ async function loginsView() {
         section(
           `On ${match.host}`,
           match.items.length
-            ? list(match.items, true)
+            ? list(match.items, true, !!match.items[0] && fillable(match.items[0]))
             : h(
                 "div",
                 { class: "card empty" },
@@ -646,6 +660,18 @@ async function loginsView() {
     }, 180);
   };
   search.addEventListener("input", runSearch);
+  // Opened on a site with a saved login: Enter fills the first one (Cmd/Ctrl+Shift+L, then Enter).
+  search.addEventListener("keydown", (e) => {
+    const first = match?.items[0];
+    const tabId = activeTab?.id;
+    if (e.key !== "Enter" || search.value.trim() || !first || !fillable(first)) return;
+    if (tabId === undefined) return;
+    e.preventDefault();
+    void act(async () => {
+      await send({ type: "fill", tabId, ...ref(first) });
+      window.close();
+    });
+  });
 
   render(banner, h("div", { class: "search" }, icon("search", 15), search), results);
   if (lastQuery.trim()) runSearch();

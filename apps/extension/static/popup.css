@@ -186,6 +186,7 @@ button:disabled { opacity: 0.55; cursor: default; }
 .item .actions { display: flex; gap: 1px; align-items: center; }
 .item .actions button.icon { width: 28px; height: 28px; }
 .item .actions .fill { height: 28px; padding: 0 10px; font-size: 12px; border-radius: 7px; margin-left: 2px; }
+.item .actions .fill .kbd { margin-left: 5px; opacity: .6; font-size: 11px; }
 .badge { flex-shrink: 0; padding: 0 5px; border: 1px solid var(--border); border-radius: 5px; font-size: 10px; font-weight: 500; color: var(--muted-foreground); line-height: 16px; }
 
 .avatar {

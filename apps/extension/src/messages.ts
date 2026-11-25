@@ -109,6 +109,23 @@ export interface PendingSave {
 
 export type SaveAction = "save" | "update" | "ignore" | "never";
 
+/** A login offered in the menu under a page's login field. Names only: never a secret. */
+export interface InlineItem {
+  id: string;
+  name: string;
+  username: string | null;
+  /** Where a team or shared login comes from. */
+  badge: string | null;
+  workspaceId?: string;
+  shared?: boolean;
+}
+
+/** What the page's login-field menu may show: the logins for the page's own site, if unlocked. */
+export interface InlineMatch {
+  status: Status;
+  items: InlineItem[];
+}
+
 /** Popup/content → background. The vault key and secrets never travel the other way unasked. */
 export type Request =
   | { type: "state" }
@@ -142,6 +159,14 @@ export type Request =
   | { type: "formSubmitted"; username: string; password: string }
   | { type: "pendingSave" }
   | { type: "resolveSave"; id: string; action: SaveAction }
+  /** The logins for the sender page's site (taken from the browser, not the page). */
+  | { type: "inlineMatch" }
+  /** The user picked a login in the page's menu: fill it into that same tab. */
+  | { type: "inlineFill"; itemId: string; workspaceId?: string; shared?: boolean }
+  /** Step one of a two-step sign-in: the username, remembered briefly for the password step. */
+  | { type: "usernameSeen"; username: string }
+  /** The page's menu asks the user to unlock: open the toolbar popup. */
+  | { type: "openPopup" }
   | { type: "activity" }
   // From the content script on the Minions web app's own origin only.
   | { type: "bridgeHello" }
@@ -183,7 +208,13 @@ export function isValidRequest(msg: unknown): msg is Request {
     case "clipboardWritten":
     case "totpList":
     case "bridgeHello":
+    case "inlineMatch":
+    case "openPopup":
       return true;
+    case "inlineFill":
+      return uuid(m.itemId) && optionalId(m.workspaceId) && optionalBool(m.shared);
+    case "usernameSeen":
+      return str(m.username, 256);
     case "connect":
       return optionalBool(m.silent);
     case "browse":
