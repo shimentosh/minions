@@ -22,6 +22,8 @@ export interface EditorRequest {
   workspaceId?: string;
   /** Edit an item someone else shared with this user (edit access). */
   shared?: boolean;
+  /** Field key to focus when the editor opens ("name" for the title). */
+  focusField?: string;
 }
 
 interface UiState {

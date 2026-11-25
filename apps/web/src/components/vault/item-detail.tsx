@@ -14,6 +14,7 @@ import { Link } from "@tanstack/react-router";
 import {
   Archive,
   ArchiveRestore,
+  Copy,
   Eye,
   FolderKanban,
   History,
@@ -22,19 +23,30 @@ import {
   Link2,
   MoreHorizontal,
   Pencil,
+  PencilLine,
   Star,
   Trash2,
   User,
   Users,
   X,
 } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import {
+  AlertDialog,
+  AlertDialogClose,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogPopup,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Menu, MenuItem, MenuPopup, MenuSeparator, MenuTrigger } from "@/components/ui/menu";
 import { Skeleton } from "@/components/ui/skeleton";
-import { del, errorMessage, get, post } from "@/lib/api";
+import { del, errorMessage, get, patch, post } from "@/lib/api";
 import { copySecret } from "@/lib/clipboard";
+import { cn } from "@/lib/cn";
 import { ACTION_LABELS, shortDate, timeAgo } from "@/lib/format";
 import { ItemGlyph } from "@/lib/item-icons";
 import { loadPersonalItem } from "@/lib/people-sharing";
@@ -46,13 +58,33 @@ import {
   useRestoreItem,
   useToggleFavorite,
 } from "@/lib/queries";
-import { toast } from "@/lib/toast";
+import { toast, toastWithAction } from "@/lib/toast";
 import { useUi } from "@/lib/ui-store";
 import { keyFor, revealField } from "@/lib/vault-crypto";
 import { FieldRow } from "./field-row";
 import { ItemPicker } from "./item-picker";
 import { useArchiveItems, useMoveDialog } from "./organize";
 import { ShareItemDialog } from "./share-dialog";
+
+async function copyName(name: string) {
+  try {
+    await navigator.clipboard.writeText(name);
+    toast.success("Name copied");
+  } catch {
+    toast.error("Couldn't copy");
+  }
+}
+
+/** A link that opens this item for anyone who can see it (it stays encrypted). */
+async function copyLink(id: string) {
+  try {
+    const { origin, pathname } = window.location;
+    await navigator.clipboard.writeText(`${origin}${pathname}?item=${id}`);
+    toast.success("Link copied");
+  } catch {
+    toast.error("Couldn't copy");
+  }
+}
 
 export function Meta({ label, value }: { label: string; value: React.ReactNode }) {
   return (
@@ -323,8 +355,132 @@ function ItemActivity({ itemId }: { itemId: string }) {
   );
 }
 
+/**
+ * The item's name. Double-click (or F2) to rename it in place: Enter or
+ * clicking away saves, Escape cancels. Only the plaintext name changes, so
+ * nothing is decrypted or re-encrypted.
+ */
+function EditableTitle({
+  item,
+  editing,
+  setEditing,
+}: {
+  item: VaultItemDetail;
+  editing: boolean;
+  setEditing: (v: boolean) => void;
+}) {
+  const invalidate = useInvalidateVault();
+  const [draft, setDraft] = useState(item.name);
+  // Shown while the rename is saving so the title doesn't flick back.
+  const [pending, setPending] = useState<string | null>(null);
+  const cancelled = useRef(false);
+  const rename = useMutation({
+    mutationFn: (name: string) => patch(`/vault/items/${item.id}`, { name }),
+    onSuccess: async () => {
+      await invalidate();
+      setPending(null);
+    },
+    onError: (e) => {
+      setPending(null);
+      toast.error("Couldn't rename", errorMessage(e));
+    },
+  });
+  const canEdit = !item.deletedAt;
+
+  function start() {
+    if (!canEdit) return;
+    window.getSelection()?.removeAllRanges();
+    cancelled.current = false;
+    setDraft(pending ?? item.name);
+    setEditing(true);
+  }
+  function commit() {
+    setEditing(false);
+    if (cancelled.current) return;
+    const name = draft.trim();
+    if (!name || name === item.name) return;
+    setPending(name);
+    rename.mutate(name);
+  }
+
+  if (editing)
+    return (
+      <input
+        // biome-ignore lint/a11y/noAutofocus: the person just asked to rename
+        autoFocus
+        onFocus={(e) => e.currentTarget.select()}
+        value={draft}
+        maxLength={200}
+        aria-label="Item name"
+        onChange={(e) => setDraft(e.target.value)}
+        onBlur={commit}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") {
+            e.preventDefault();
+            e.currentTarget.blur();
+          } else if (e.key === "Escape") {
+            e.preventDefault();
+            e.stopPropagation();
+            cancelled.current = true;
+            e.currentTarget.blur();
+          }
+        }}
+        className="-mx-1.5 -my-0.5 w-full rounded-md border border-ring bg-background px-1.5 py-0.5 font-semibold text-xl outline-none ring-2 ring-ring/30"
+      />
+    );
+
+  const name = pending ?? item.name;
+  return (
+    <h1
+      className={cn(
+        "-mx-1.5 truncate rounded-md px-1.5 font-semibold text-xl",
+        canEdit && "cursor-text hover:bg-accent/60",
+        rename.isPending && "opacity-70",
+      )}
+      title={canEdit ? `${name}\nDouble-click to rename` : name}
+      onDoubleClick={start}
+    >
+      {name}
+    </h1>
+  );
+}
+
+/** Single-key shortcuts while the details panel is showing and nothing else has focus. */
+function useDetailShortcuts(handlers: Record<string, () => void>) {
+  const ref = useRef(handlers);
+  ref.current = handlers;
+  useEffect(() => {
+    function onKey(e: KeyboardEvent) {
+      if (e.defaultPrevented || e.metaKey || e.ctrlKey || e.altKey) return;
+      const t = e.target as HTMLElement | null;
+      if (
+        t &&
+        (t.isContentEditable ||
+          ["INPUT", "TEXTAREA", "SELECT"].includes(t.tagName) ||
+          t.closest('[role="menu"],[role="listbox"],[role="dialog"],[role="alertdialog"]'))
+      )
+        return;
+      // Something modal or a popup is open (editor, share, move, palette): leave the keys to it.
+      if (
+        document.querySelector(
+          "[data-slot=dialog-popup],[data-slot=alert-dialog-popup],[data-slot=sheet-popup],[data-slot=command-dialog-popup],[data-slot=menu-popup],[data-slot=popover-popup]",
+        )
+      )
+        return;
+      const fn = ref.current[e.key.length === 1 ? e.key.toLowerCase() : e.key];
+      if (!fn) return;
+      e.preventDefault();
+      fn();
+    }
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
+}
+
 export function ItemDetail({ id, onClose }: { id: string; onClose?: () => void }) {
   const [sharing, setSharing] = useState(false);
+  const [renaming, setRenaming] = useState(false);
+  const [confirmPurge, setConfirmPurge] = useState(false);
   const { data: item, isLoading, error } = useItem(id);
   const openEditor = useUi((s) => s.openEditor);
   const openMove = useMoveDialog((s) => s.open);
@@ -336,10 +492,30 @@ export function ItemDetail({ id, onClose }: { id: string; onClose?: () => void }
   const purge = useMutation({
     mutationFn: () => del(`/vault/items/${id}/purge`),
     onSuccess: () => {
+      setConfirmPurge(false);
       toast.success("Deleted permanently");
       onClose?.();
       void invalidate();
     },
+    onError: (e) => toast.error(errorMessage(e)),
+  });
+
+  function trash() {
+    if (!item) return;
+    remove.mutate(item.id, {
+      onSuccess: () => {
+        toastWithAction("Moved to trash", "Undo", () => restore.mutate(item.id));
+        onClose?.();
+      },
+      onError: (e) => toast.error(errorMessage(e)),
+    });
+  }
+  const live = !!item && !item.deletedAt;
+  useDetailShortcuts({
+    e: () => live && openEditor({ itemId: id }),
+    F2: () => live && setRenaming(true),
+    f: () => item && favorite.mutate({ id: item.id, favorite: !item.favorite }),
+    Escape: () => onClose?.(),
   });
 
   if (isLoading) {
@@ -366,7 +542,7 @@ export function ItemDetail({ id, onClose }: { id: string; onClose?: () => void }
       <div className="flex items-start gap-3">
         <ItemGlyph type={item.type} className="size-11 rounded-xl [&_svg]:size-5" />
         <div className="min-w-0 flex-1">
-          <h1 className="truncate font-semibold text-xl">{item.name}</h1>
+          <EditableTitle item={item} editing={renaming} setEditing={setRenaming} />
           <div className="mt-1 flex flex-wrap items-center gap-1.5 text-muted-foreground text-xs">
             <span>{def?.label ?? item.type}</span>
             {item.environment && (
@@ -430,6 +606,7 @@ export function ItemDetail({ id, onClose }: { id: string; onClose?: () => void }
             size="icon-sm"
             onClick={() => favorite.mutate({ id: item.id, favorite: !item.favorite })}
             aria-label={item.favorite ? "Remove from favorites" : "Add to favorites"}
+            title={`${item.favorite ? "Remove from favorites" : "Add to favorites"} (F)`}
           >
             <Star className={item.favorite ? "fill-amber-400 text-amber-400" : ""} />
           </Button>
@@ -439,7 +616,12 @@ export function ItemDetail({ id, onClose }: { id: string; onClose?: () => void }
             </Button>
           )}
           {!item.deletedAt && (
-            <Button variant="outline" size="sm" onClick={() => openEditor({ itemId: item.id })}>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => openEditor({ itemId: item.id })}
+              title="Edit (E)"
+            >
               <Pencil /> Edit
             </Button>
           )}
@@ -456,12 +638,22 @@ export function ItemDetail({ id, onClose }: { id: string; onClose?: () => void }
                     <ArchiveRestore /> Restore
                   </MenuItem>
                   <MenuSeparator />
-                  <MenuItem variant="destructive" onClick={() => purge.mutate()}>
+                  <MenuItem variant="destructive" onClick={() => setConfirmPurge(true)}>
                     <Trash2 /> Delete permanently
                   </MenuItem>
                 </>
               ) : (
                 <>
+                  <MenuItem onClick={() => setRenaming(true)}>
+                    <PencilLine /> Rename
+                  </MenuItem>
+                  <MenuItem onClick={() => void copyName(item.name)}>
+                    <Copy /> Copy name
+                  </MenuItem>
+                  <MenuItem onClick={() => void copyLink(item.id)}>
+                    <Link2 /> Copy link
+                  </MenuItem>
+                  <MenuSeparator />
                   <MenuItem onClick={() => openMove("project", [item])}>
                     <FolderKanban /> Move to project…
                   </MenuItem>
@@ -473,17 +665,7 @@ export function ItemDetail({ id, onClose }: { id: string; onClose?: () => void }
                     {item.archivedAt ? "Unarchive" : "Archive"}
                   </MenuItem>
                   <MenuSeparator />
-                  <MenuItem
-                    variant="destructive"
-                    onClick={() =>
-                      remove.mutate(item.id, {
-                        onSuccess: () => {
-                          toast.success("Moved to trash");
-                          onClose?.();
-                        },
-                      })
-                    }
-                  >
+                  <MenuItem variant="destructive" onClick={trash}>
                     <Trash2 /> Move to trash
                   </MenuItem>
                 </>
@@ -505,11 +687,38 @@ export function ItemDetail({ id, onClose }: { id: string; onClose?: () => void }
       </div>
 
       {sharing && <ShareItemDialog item={item} open={sharing} onOpenChange={setSharing} />}
+      <AlertDialog open={confirmPurge} onOpenChange={setConfirmPurge}>
+        <AlertDialogPopup>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Delete {item.name} permanently?</AlertDialogTitle>
+            <AlertDialogDescription>
+              It is erased with its history. This cannot be undone.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogClose render={<Button variant="ghost" />}>Cancel</AlertDialogClose>
+            <Button variant="destructive" loading={purge.isPending} onClick={() => purge.mutate()}>
+              Delete permanently
+            </Button>
+          </AlertDialogFooter>
+        </AlertDialogPopup>
+      </AlertDialog>
       {item.description && <p className="text-muted-foreground text-sm">{item.description}</p>}
 
       <Block title="Details">
         {item.fields.length === 0 && (
-          <p className="px-4 py-3 text-muted-foreground text-xs">No fields yet.</p>
+          <p className="px-4 py-3 text-muted-foreground text-xs">
+            No fields yet.{" "}
+            {!item.deletedAt && (
+              <button
+                type="button"
+                className="text-foreground underline-offset-4 hover:underline"
+                onClick={() => openEditor({ itemId: item.id })}
+              >
+                Add some
+              </button>
+            )}
+          </p>
         )}
         {item.fields.map((f) => (
           <FieldRow
@@ -518,6 +727,9 @@ export function ItemDetail({ id, onClose }: { id: string; onClose?: () => void }
             type={item.type}
             field={f}
             cardLast4={item.cardLast4}
+            onEdit={
+              item.deletedAt ? undefined : () => openEditor({ itemId: item.id, focusField: f.key })
+            }
           />
         ))}
       </Block>

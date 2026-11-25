@@ -19,6 +19,7 @@ import { ItemGlyph } from "@/lib/item-icons";
 import { useDeleteItem, useToggleFavorite } from "@/lib/queries";
 import { useSelection } from "@/lib/selection";
 import { toast } from "@/lib/toast";
+import { useUi } from "@/lib/ui-store";
 import { useArchiveItems, useDraggableItem, useMoveDialog } from "./organize";
 
 /** A small coloured label for the project or collection an item sits in. */
@@ -46,6 +47,7 @@ export function GroupChip({
 /**
  * What every item row shares, list or table: drag it, click to open, and
  * tick it (click while others are ticked, Cmd/Ctrl-click, Shift-click a range, or "x").
+ * Double-click (or "e") opens the editor.
  */
 export function useItemRow(item: VaultItemSummary, list: VaultItemSummary[], onOpen: () => void) {
   const selected = useSelection((s) => s.ids.has(item.id));
@@ -53,6 +55,10 @@ export function useItemRow(item: VaultItemSummary, list: VaultItemSummary[], onO
   const toggle = useSelection((s) => s.toggle);
   const extend = useSelection((s) => s.extend);
   const drag = useDraggableItem(item, list);
+  const openEditor = useUi((s) => s.openEditor);
+  const edit = () => {
+    if (!item.deletedAt) openEditor({ itemId: item.id });
+  };
 
   const tick = (e: MouseEvent) => {
     e.stopPropagation();
@@ -72,11 +78,19 @@ export function useItemRow(item: VaultItemSummary, list: VaultItemSummary[], onO
       if (e.metaKey || e.ctrlKey || e.shiftKey || anySelected) tick(e);
       else onOpen();
     },
+    onDoubleClick: (e: MouseEvent) => {
+      if (e.metaKey || e.ctrlKey || e.shiftKey || anySelected) return;
+      edit();
+    },
     onKeyDown: (e: KeyboardEvent) => {
       // Space picks the row up for a keyboard drag (dnd-kit); Enter opens it.
       if (e.key === "Enter") onOpen();
       else if (e.key === "x") toggle(item.id);
-      else drag.listeners?.onKeyDown?.(e);
+      else if (e.key === "e" && !e.metaKey && !e.ctrlKey && !e.altKey) {
+        e.preventDefault();
+        e.stopPropagation();
+        edit();
+      } else drag.listeners?.onKeyDown?.(e);
     },
   };
   return { selected, anySelected, tick, drag, rowProps };

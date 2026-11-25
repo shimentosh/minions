@@ -5,7 +5,7 @@ import {
   maskCard,
   resolveField,
 } from "@minions/core";
-import { Copy, ExternalLink, Eye, EyeOff } from "lucide-react";
+import { Copy, ExternalLink, Eye, EyeOff, Pencil } from "lucide-react";
 import { useEffect, useState } from "react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -37,11 +37,14 @@ export function FieldRow({
   type,
   field,
   cardLast4,
+  onEdit,
 }: {
   itemId: string;
   type: string;
   field: ItemField;
   cardLast4?: string | null;
+  /** Opens the editor on this field (pencil button, or double-click the row). */
+  onEdit?: () => void;
 }) {
   const resolved = resolveField(
     type,
@@ -149,7 +152,15 @@ export function FieldRow({
   const isPassword = typeDef?.passwordField === field.key;
 
   return (
-    <div className="group flex items-start gap-3 border-border/60 border-b px-4 py-2.5 last:border-b-0">
+    <div
+      className="group flex items-start gap-3 border-border/60 border-b px-4 py-2.5 last:border-b-0"
+      onDoubleClick={(e) => {
+        // Links, buttons and long text keep their own double-click (open, select a word).
+        if (!onEdit || (e.target as HTMLElement).closest("a,button,pre")) return;
+        window.getSelection()?.removeAllRanges();
+        onEdit();
+      }}
+    >
       <div className="min-w-0 flex-1">
         <div className="flex items-center gap-1.5 text-muted-foreground text-xs">
           <FieldIcon className="size-3.5" aria-hidden />
@@ -158,9 +169,20 @@ export function FieldRow({
         </div>
         <div className="mt-0.5 min-h-5 text-sm">{display}</div>
       </div>
-      {kind !== "totp" && (
+      {(kind !== "totp" || onEdit) && (
         <div className="flex shrink-0 items-center gap-0.5 opacity-70 group-hover:opacity-100 touch:opacity-100">
-          {field.sensitive && (
+          {onEdit && (
+            <Button
+              variant="ghost"
+              size="icon-xs"
+              onClick={onEdit}
+              aria-label={`Edit ${label}`}
+              className="opacity-0 focus-visible:opacity-100 group-hover:opacity-100 touch:opacity-100"
+            >
+              <Pencil />
+            </Button>
+          )}
+          {kind !== "totp" && field.sensitive && (
             <Button
               variant="ghost"
               size="icon-xs"
@@ -170,9 +192,11 @@ export function FieldRow({
               {revealed ? <EyeOff /> : <Eye />}
             </Button>
           )}
-          <Button variant="ghost" size="icon-xs" onClick={copy} aria-label={`Copy ${label}`}>
-            <Copy />
-          </Button>
+          {kind !== "totp" && (
+            <Button variant="ghost" size="icon-xs" onClick={copy} aria-label={`Copy ${label}`}>
+              <Copy />
+            </Button>
+          )}
         </div>
       )}
     </div>

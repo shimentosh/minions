@@ -483,6 +483,22 @@ function EditorForm({
     const t = window.setTimeout(() => document.getElementById("f-url")?.focus(), 50);
     return () => window.clearTimeout(t);
   }, [isNew, hasWebsite]);
+  // Opened from a field in the details panel: start on that field.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: only on open
+  useEffect(() => {
+    const key = request.focusField;
+    if (!key) return;
+    const t = window.setTimeout(() => {
+      const el =
+        document.getElementById(key === "name" ? "item-name" : `f-${key}`) ??
+        document.getElementById(key);
+      if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) {
+        el.focus();
+        el.select();
+      } else el?.focus();
+    }, 60);
+    return () => window.clearTimeout(t);
+  }, []);
   const usernameHidden = type === "LOGIN" && !showUsername && !values.username;
   const provider =
     values.provider ??
