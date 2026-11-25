@@ -405,13 +405,7 @@ chrome.runtime.onInstalled.addListener(async () => {
     if (t.id === undefined) continue;
     // A tab that already has a live copy (it loaded after the install) keeps
     // just that one: two would both answer the app.
-    const live = await chrome.tabs
-      .sendMessage(t.id, { type: "minions-alive" }, { frameId: 0 })
-      .catch(() => false);
-    if (live === true) continue;
-    await chrome.scripting
-      .executeScript({ target: { tabId: t.id }, files: ["content.js"] })
-      .catch(() => undefined);
+    await reviveContent(t.id);
   }
 });
 
@@ -490,6 +484,52 @@ function stateChanged() {
 async function appTabs() {
   const tabs = await chrome.tabs.query({ url: `${WEB_ORIGIN}/*` });
   return tabs.sort((a, b) => Number(b.active) - Number(a.active));
+}
+
+/** True when the tab's page has a working copy of the content script. */
+async function hasContent(tabId: number) {
+  const live = await chrome.tabs
+    .sendMessage(tabId, { type: "minions-alive" }, { frameId: 0 })
+    .catch(() => false);
+  return live === true;
+}
+
+/**
+ * Puts the content script into a tab whose page has none that works: open
+ * before the extension was installed, reloaded or updated (Chrome leaves the
+ * old copy cut off, and adds no new one until the page reloads). Possible on
+ * the Minions app, and on any site while the user has the popup open there.
+ */
+async function reviveContent(tabId: number) {
+  if (await hasContent(tabId)) return true;
+  try {
+    await chrome.scripting.executeScript({
+      target: { tabId, frameIds: [0] },
+      files: ["content.js"],
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Logins just moved to the Trash from a page's menu, which that menu may undo. */
+const trashedHere = new Map<string, number>();
+
+const NO_RECEIVER = /Receiving end does not exist|Could not establish connection/i;
+
+/** Sends to a tab's top frame, putting a fresh content script there first if it has none. */
+async function sendToPage<T>(tabId: number, msg: unknown): Promise<T | undefined> {
+  try {
+    return (await chrome.tabs.sendMessage(tabId, msg, { frameId: 0 })) as T | undefined;
+  } catch (e) {
+    if (!NO_RECEIVER.test(String((e as Error)?.message ?? e))) throw e;
+    if (!(await reviveContent(tabId)))
+      throw new Error(
+        "Minions was updated after this page opened. Reload the page, then try again.",
+      );
+    return (await chrome.tabs.sendMessage(tabId, msg, { frameId: 0 })) as T | undefined;
+  }
 }
 
 /** Asks the app in a tab to say hello again (and so to connect, if it is unlocked). */
@@ -706,9 +746,7 @@ async function fillTab(
     password,
   };
   // Top frame only: an embedded, possibly cross-origin iframe never receives credentials.
-  const res = (await chrome.tabs.sendMessage(tabId, msg, { frameId: 0 })) as
-    | { filled?: boolean }
-    | undefined;
+  const res = await sendToPage<{ filled?: boolean }>(tabId, msg);
   if (!res?.filled) throw new Error("No login form found on this page");
   await recordUsage(opened, "item.autofilled");
 }
@@ -887,6 +925,8 @@ async function handle(req: Request, sender: chrome.runtime.MessageSender): Promi
       "inlineFill",
       "inlineGenerate",
       "inlineTotp",
+      "inlineTrash",
+      "inlineRestore",
       "undoSave",
       "usernameSeen",
       "openPopup",
@@ -965,6 +1005,10 @@ async function handle(req: Request, sender: chrome.runtime.MessageSender): Promi
     case "match": {
       const tab = await chrome.tabs.get(req.tabId);
       const host = normalizeHost(tab.url ?? null);
+      // The popup was opened on this page (so it may be scripted now): bring
+      // back its in-field menu if an extension update left it cut off.
+      if (host && /^https:|^http:\/\/(localhost|127\.0\.0\.1)[:/]/.test(tab.url ?? ""))
+        void reviveContent(req.tabId);
       if (!host) return { host: null, items: [] } satisfies MatchResponse;
       await vaultKey();
       return { host, items: await matchAll(host) } satisfies MatchResponse;
@@ -1066,6 +1110,27 @@ async function handle(req: Request, sender: chrome.runtime.MessageSender): Promi
       await session.set({ lastActivity: Date.now() });
       await fillTab(sender.tab!.id!, req, !!req.link, sender.url);
       return null;
+    case "inlineTrash": {
+      // Personal logins for the asking page's own site only (as the browser
+      // reports it), and only to the Trash: restorable from there or by Undo.
+      await vaultKey();
+      const item = await api<VaultItemDetail>(itemPath(req.itemId));
+      const savedUrl = item.fields.find((f) => f.key === "url" && !f.sensitive)?.value ?? null;
+      if (!(item.host || savedUrl) || !canFill(savedUrl, item.host, sender.url ?? ""))
+        throw new Error("Only a login for this site can be removed here");
+      await api(itemPath(req.itemId), { method: "DELETE" });
+      trashedHere.set(req.itemId, Date.now());
+      return null;
+    }
+    case "inlineRestore": {
+      // Undo, for a login this menu just moved to the Trash.
+      const at = trashedHere.get(req.itemId);
+      if (!at || Date.now() - at > 10 * 60_000)
+        throw new Error("Restore it from the Trash in Minions");
+      await api(`${itemPath(req.itemId)}/restore`, { method: "POST" });
+      trashedHere.delete(req.itemId);
+      return null;
+    }
     case "usernameSeen": {
       if ((await session.get()).status !== "unlocked" || !senderHost || !req.username) return null;
       await session.set({

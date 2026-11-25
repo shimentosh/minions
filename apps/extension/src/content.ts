@@ -29,7 +29,48 @@ declare const __WEB_URL__: string;
 /** This page is the Minions web app itself (top frame): bridge to it, never offer to save its login. */
 const ON_APP = window.top === window && location.origin === new URL(__WEB_URL__).origin;
 
+// ─── Left behind by an extension reload ──────────────────────────────────────
+// Reloading or updating the extension cuts off the copy of this script that
+// is already in each open page. That copy then stops and takes its menu and
+// button away, so a fresh copy (added by the background) works instead of it.
+
+const life = new AbortController();
+const observers: MutationObserver[] = [];
+
+function alive() {
+  if (chrome.runtime?.id) return true;
+  if (!life.signal.aborted) {
+    life.abort();
+    for (const o of observers) o.disconnect();
+    try {
+      closeMenu();
+      fieldIcon?.host.remove();
+    } catch {
+      // Not built yet.
+    }
+  }
+  return false;
+}
+
+/** A page-wide listener that goes away with this copy of the script. */
+function listen<K extends keyof WindowEventMap>(
+  target: Window | Document,
+  type: K,
+  fn: (e: WindowEventMap[K]) => void,
+  opts: boolean | AddEventListenerOptions = false,
+) {
+  const o = typeof opts === "boolean" ? { capture: opts } : opts;
+  target.addEventListener(
+    type,
+    (e) => {
+      if (alive()) fn(e as WindowEventMap[K]);
+    },
+    { ...o, signal: life.signal },
+  );
+}
+
 function call<T>(req: Request): Promise<Response<T> | null> {
+  if (!alive()) return Promise.resolve(null);
   try {
     return chrome.runtime
       .sendMessage(req)
@@ -356,6 +397,14 @@ const MENU_CSS = `
   .info .meta{color:var(--muted)}
   button.btn{all:unset;cursor:pointer;flex:none;font-weight:550;font-size:12px;padding:6px 10px;border-radius:8px;background:var(--primary);color:var(--on-primary)}
   .msg{padding:0 10px 10px}
+  .del{flex:none;display:grid;place-items:center;width:24px;height:24px;border-radius:6px;color:var(--muted);opacity:0;transition:opacity .1s ease}
+  .item:hover .del,.item.on .del{opacity:1}
+  .del:hover{color:#dc2626;background:rgba(220,38,38,.12)}
+  .item.busy{opacity:.5;pointer-events:none}
+  .item.trashed{cursor:default}
+  .item.trashed .name{color:var(--muted);font-weight:500}
+  .undo{flex:none;font-size:12px;font-weight:600;padding:3px 9px;border-radius:6px;border:1px solid var(--line);color:var(--fg);cursor:pointer}
+  .undo:hover{background:var(--hover)}
 `;
 
 const PLUS_SVG =
@@ -364,6 +413,8 @@ const MAIL_SVG =
   '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><rect width="20" height="16" x="2" y="4" rx="2"/><path d="m22 7-8.97 5.7a1.94 1.94 0 0 1-2.06 0L2 7"/></svg>';
 const TIMER_SVG =
   '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><line x1="10" x2="14" y1="2" y2="2"/><line x1="12" x2="15" y1="14" y2="11"/><circle cx="12" cy="14" r="8"/></svg>';
+const TRASH_SVG =
+  '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"/><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"/><line x1="10" x2="10" y1="11" y2="17"/><line x1="14" x2="14" y1="11" y2="17"/></svg>';
 const REFRESH_SVG =
   '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M8 16H3v5"/></svg>';
 
@@ -537,22 +588,93 @@ function itemRef(it: InlineItem) {
   };
 }
 
+/** A small action inside a row (the row itself is the button that fills). */
+function rowAction(cls: string, content: HTMLElement | string, label: string, run: () => void) {
+  const a = el("span", cls, content);
+  a.setAttribute("role", "button");
+  a.setAttribute("aria-label", label);
+  a.title = label;
+  a.addEventListener("click", (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (e.isTrusted) run();
+  });
+  return a;
+}
+
 function loginRow(it: InlineItem, anchor: HTMLInputElement): Row {
+  // Personal logins can be cleared out from here; team and shared ones belong to others.
+  const personal = !it.workspaceId && !it.shared;
   const row = rowButton(letterIcon(it.name), it.name, it.username, [
     it.badge ? el("span", "badge trunc", it.badge) : null,
     el("span", "go", "Fill"),
+    personal
+      ? rowAction(
+          "del",
+          svg(TRASH_SVG),
+          `Move ${it.username || it.name} to the Trash`,
+          () => void trashRow(r, it),
+        )
+      : null,
   ]);
   row.title = `Fill ${it.username || it.name}`;
-  return {
+  const r: Row = {
     el: row,
     match: `${it.username ?? ""} ${it.name}`.toLowerCase(),
     run: async () => {
       fillAnchor = anchor;
-      const r = await call({ type: "inlineFill", ...itemRef(it) });
+      const res = await call({ type: "inlineFill", ...itemRef(it) });
       fillAnchor = null;
-      return r?.ok ? null : (r?.error ?? "Minions did not answer. Reload the page.");
+      return res?.ok
+        ? null
+        : (res?.error ?? "Minions was updated. Reload this page, then try again.");
     },
   };
+  return r;
+}
+
+/**
+ * Moves a login the user no longer needs to the Trash, right from the menu.
+ * The row then says so, with an Undo; the Trash in Minions keeps it as well.
+ */
+async function trashRow(r: Row, it: InlineItem) {
+  const m = menu;
+  const before = [...r.el.childNodes];
+  const fill = r.run;
+  r.el.classList.add("busy");
+  const res = await call({ type: "inlineTrash", itemId: it.id });
+  r.el.classList.remove("busy");
+  if (!res?.ok) {
+    if (m) showMenuMessage(m, res?.error ?? "Minions did not answer. Reload this page.");
+    return;
+  }
+  matchCache = null;
+  r.run = async () => KEEP;
+  r.el.classList.add("trashed");
+  r.el.title = "";
+  r.el.replaceChildren(
+    el("span", "ic", svg(TRASH_SVG)),
+    el(
+      "span",
+      "meta",
+      el("span", "name trunc", "Moved to the Trash"),
+      el("span", "sub trunc", it.username || it.name),
+    ),
+    rowAction("undo", "Undo", "Undo: put this login back", async () => {
+      r.el.classList.add("busy");
+      const back = await call({ type: "inlineRestore", itemId: it.id });
+      r.el.classList.remove("busy");
+      if (!back?.ok) {
+        if (menu) showMenuMessage(menu, back?.error ?? "Could not put it back");
+        return;
+      }
+      matchCache = null;
+      r.run = fill;
+      r.el.classList.remove("trashed");
+      r.el.title = `Fill ${it.username || it.name}`;
+      r.el.replaceChildren(...before);
+    }),
+  );
 }
 
 /** A login saved without a website: the first click asks, the second fills and remembers. */
@@ -580,7 +702,7 @@ function unlinkedRow(it: InlineItem, anchor: HTMLInputElement, host: string | nu
       const r = await call({ type: "inlineFill", ...itemRef(it), link: true });
       fillAnchor = null;
       matchCache = null;
-      return r?.ok ? null : (r?.error ?? "Minions did not answer. Reload the page.");
+      return r?.ok ? null : (r?.error ?? "Minions was updated. Reload this page, then try again.");
     },
   };
 }
@@ -635,7 +757,7 @@ function rowsFor(m: Menu, data: InlineMatch): Row[] {
           run: async () => {
             // Fetched again when used, so the code is current and the use recorded.
             const r = await call<TotpCode>({ type: "inlineTotp", ...ref(it) });
-            if (!r?.ok) return r?.error ?? "Minions did not answer. Reload the page.";
+            if (!r?.ok) return r?.error ?? "Minions was updated. Reload this page, then try again.";
             fillCode(anchor, r.data.code);
             return null;
           },
@@ -832,7 +954,8 @@ function schedulePlace() {
 }
 
 if (!ON_APP) {
-  document.addEventListener(
+  listen(
+    document,
     "focusin",
     (e) => {
       if (menu && e.target !== menu.anchor) closeMenu();
@@ -840,7 +963,8 @@ if (!ON_APP) {
     },
     true,
   );
-  document.addEventListener(
+  listen(
+    document,
     "focusout",
     (e) => {
       if (!menu || e.target !== menu.anchor) return;
@@ -851,7 +975,8 @@ if (!ON_APP) {
     },
     true,
   );
-  document.addEventListener(
+  listen(
+    document,
     "input",
     (e) => {
       // Our own fill dispatches untrusted input events: only real typing counts.
@@ -859,19 +984,22 @@ if (!ON_APP) {
     },
     true,
   );
-  addEventListener("scroll", schedulePlace, { capture: true, passive: true });
-  addEventListener("resize", schedulePlace, { passive: true });
+  listen(window, "scroll", schedulePlace, { capture: true, passive: true });
+  listen(window, "resize", schedulePlace, { passive: true });
   // A field focused before this script ran (autofocus on a sign-in page).
   maybeOpen(document.activeElement);
   // 2FA steps often appear without a page load (single-page sign-ins).
   scanForCodeField();
   let scanTimer = 0;
-  new MutationObserver(() => {
+  const codeWatch = new MutationObserver(() => {
     window.clearTimeout(scanTimer);
-    scanTimer = window.setTimeout(scanForCodeField, 400);
-  }).observe(document.documentElement, { childList: true, subtree: true });
+    scanTimer = window.setTimeout(() => alive() && scanForCodeField(), 400);
+  });
+  codeWatch.observe(document.documentElement, { childList: true, subtree: true });
+  observers.push(codeWatch);
   // A menu opened on its own closes when the user clicks anywhere else.
-  document.addEventListener(
+  listen(
+    document,
     "mousedown",
     (e) => {
       if (menu && e.target !== menu.anchor && !e.composedPath().includes(menu.host)) closeMenu();
@@ -1017,22 +1145,25 @@ if (!ON_APP) {
     const kind = classify(t);
     if (kind) void showIcon(t as HTMLInputElement, kind);
   };
-  document.addEventListener("focusin", (e) => iconFor(e.target), true);
-  document.addEventListener(
+  listen(document, "focusin", (e) => iconFor(e.target), true);
+  listen(
+    document,
     "focusout",
     (e) => {
       if (e.target === fieldIcon?.field) scheduleIconHide();
     },
     true,
   );
-  document.addEventListener(
+  listen(
+    document,
     "mouseover",
     (e) => {
       if (e.target instanceof HTMLInputElement) iconFor(e.target);
     },
     { capture: true, passive: true },
   );
-  document.addEventListener(
+  listen(
+    document,
     "mouseout",
     (e) => {
       if (e.target === fieldIcon?.field && document.activeElement !== e.target) scheduleIconHide();
@@ -1047,8 +1178,8 @@ if (!ON_APP) {
       placeIcon();
     });
   };
-  addEventListener("scroll", follow, { capture: true, passive: true });
-  addEventListener("resize", follow, { passive: true });
+  listen(window, "scroll", follow, { capture: true, passive: true });
+  listen(window, "resize", follow, { passive: true });
   if (document.activeElement) iconFor(document.activeElement);
 }
 
@@ -1126,14 +1257,16 @@ function reportUsernameStep() {
   void send({ type: "usernameSeen", username: value.slice(0, 256) });
 }
 
-document.addEventListener(
+listen(
+  document,
   "submit",
   (e) => {
     if (e.isTrusted) report();
   },
   true,
 );
-document.addEventListener(
+listen(
+  document,
   "click",
   (e) => {
     if (!e.isTrusted) return;
@@ -1145,7 +1278,8 @@ document.addEventListener(
   },
   true,
 );
-document.addEventListener(
+listen(
+  document,
   "keydown",
   (e) => {
     if (!e.isTrusted) return;

@@ -1,6 +1,7 @@
 // Loads the built extension into Chromium and exercises it against a local
 // login page and the running API.
-//   pnpm --filter @minions/extension build && node tests/e2e/extension.mjs
+//   MINIONS_OUT=dist-e2e pnpm --filter @minions/extension build && node tests/e2e/extension.mjs
+// (a separate folder: dist/ is the production build Chrome loads.)
 
 import { cpSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
@@ -9,7 +10,7 @@ import { join, resolve } from "node:path";
 import { chromium } from "playwright";
 
 const API = process.env.API_URL ?? "http://localhost:4600";
-const BUILT = resolve("apps/extension/dist");
+const BUILT = resolve("apps/extension/dist-e2e");
 const email = `ext-${Date.now()}@example.com`;
 const password = "Correct-Horse-Battery-Staple-42";
 const failures = [];
@@ -82,8 +83,8 @@ const vaultId = crypto.randomUUID();
 
 // The shipped extension relies on activeTab, which Chrome grants when the user
 // clicks the toolbar button. Playwright cannot click it, so the test loads a
-// copy whose manifest adds "tabs" to stand in for that grant. The shipped
-// manifest itself must not ask for it.
+// copy whose manifest adds "tabs" (and the test site) to stand in for that
+// grant. The shipped manifest itself must not ask for it.
 const shipped = JSON.parse(readFileSync(join(BUILT, "manifest.json"), "utf8"));
 check(
   !shipped.permissions.includes("tabs") &&
@@ -98,7 +99,16 @@ const EXT = mkdtempSync(join(tmpdir(), "minions-ext-build-"));
 cpSync(BUILT, EXT, { recursive: true });
 writeFileSync(
   join(EXT, "manifest.json"),
-  JSON.stringify({ ...shipped, permissions: [...shipped.permissions, "tabs"] }),
+  JSON.stringify({
+    ...shipped,
+    permissions: [...shipped.permissions, "tabs"],
+    host_permissions: [...shipped.host_permissions, "http://localhost:5199/*"],
+    // One page the content script skips, standing in for a tab opened before an update.
+    content_scripts: shipped.content_scripts.map((c) => ({
+      ...c,
+      exclude_matches: ["http://localhost/bare"],
+    })),
+  }),
 );
 
 const ctx = await chromium.launchPersistentContext(mkdtempSync(join(tmpdir(), "minions-ext-")), {
@@ -714,6 +724,63 @@ try {
       "a refused link changes nothing",
     );
     await appPage.close();
+  }
+
+  // A login no longer needed: moved to the Trash from the page's menu, with an Undo.
+  {
+    const tidy = await ctx.newPage();
+    await tidy.goto("http://localhost:5199/login");
+    const tidyTab = await popup.evaluate(
+      async () => (await chrome.tabs.query({ url: "http://localhost:5199/login" })).at(-1).id,
+    );
+    const count = async () => (await msg({ type: "match", tabId: tidyTab })).data.items.length;
+    await msg({ type: "unlock", password });
+    const before = await count();
+    await tidy.focus("#u");
+    const host = await tidy.waitForSelector("#minions-fill-menu", {
+      state: "attached",
+      timeout: 5000,
+    });
+    await new Promise((r) => setTimeout(r, 300));
+    const box = await host.boundingBox();
+    // The first row's trash button, at its right edge (the menu is a closed shadow root).
+    const rowY = box.y + 63;
+    await tidy.mouse.move(box.x + box.width / 2, rowY);
+    await tidy.mouse.click(box.x + box.width - 24, rowY);
+    await new Promise((r) => setTimeout(r, 800));
+    if (process.env.SHOT) await tidy.screenshot({ path: process.env.SHOT });
+    check((await count()) === before - 1, "a login is moved to the Trash from the page's menu");
+    check((await tidy.inputValue("#p")) === "", "removing a login does not fill it");
+    await tidy.mouse.click(box.x + box.width - 37, rowY);
+    await new Promise((r) => setTimeout(r, 800));
+    check((await count()) === before, "and Undo puts it back");
+    await tidy.close();
+  }
+
+  // A page that has no working content script (open before the extension was
+  // installed or updated; here a page the test manifest keeps it off): opening
+  // the popup there puts one in, so the page's menu works.
+  {
+    const bare = await ctx.newPage();
+    await bare.goto("http://localhost:5199/bare");
+    const bareTab = await popup.evaluate(
+      async () => (await chrome.tabs.query({ url: "http://localhost:5199/bare" })).at(-1).id,
+    );
+    const alive = () =>
+      popup.evaluate(
+        (id) =>
+          chrome.tabs.sendMessage(id, { type: "minions-alive" }, { frameId: 0 }).catch(() => false),
+        bareTab,
+      );
+    check((await alive()) !== true, "a page without the content script has none to start with");
+    await msg({ type: "match", tabId: bareTab });
+    let live = false;
+    for (let i = 0; i < 20 && !live; i++) {
+      live = (await alive()) === true;
+      if (!live) await new Promise((r) => setTimeout(r, 150));
+    }
+    check(live, "opening the popup on it brings its content script back");
+    await bare.close();
   }
 
   // The shipped extension, as people install it (no "tabs" permission): the

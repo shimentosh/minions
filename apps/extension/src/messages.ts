@@ -219,6 +219,10 @@ export type Request =
       /** A login saved without a website, confirmed for this page: fill it and remember the site. */
       link?: boolean;
     }
+  /** The user removed a login for this page's site from the page's menu: to the Trash, not erased. */
+  | { type: "inlineTrash"; itemId: string }
+  /** Undo for inlineTrash: back from the Trash. */
+  | { type: "inlineRestore"; itemId: string }
   /** Step one of a two-step sign-in: the username, remembered briefly for the password step. */
   | { type: "usernameSeen"; username: string }
   /** A strong password for a sign-up or change-password field, from the user's generator settings. */
@@ -295,6 +299,9 @@ export function isValidRequest(msg: unknown): msg is Request {
         optionalBool(m.shared) &&
         optionalBool(m.link)
       );
+    case "inlineTrash":
+    case "inlineRestore":
+      return uuid(m.itemId);
     case "inlineTotp":
       return (
         uuid(m.itemId) &&

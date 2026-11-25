@@ -11,8 +11,11 @@ const apiUrl = (
   (process.env.MINIONS_WEB_URL ? `${webUrl}/api` : "http://localhost:4600")
 ).replace(/\/$/, "");
 
-mkdirSync("dist", { recursive: true });
-cpSync("static", "dist", { recursive: true });
+// The folder Chrome loads is dist/. Tests build elsewhere (MINIONS_OUT=dist-e2e)
+// so they never swap a production build for a local one.
+const out = process.env.MINIONS_OUT ?? "dist";
+mkdirSync(out, { recursive: true });
+cpSync("static", out, { recursive: true });
 
 // The API, and the web app (to find its tab for "Sign in with Minions app"), are
 // the only hosts the extension talks to besides the pages it fills.
@@ -20,7 +23,7 @@ const manifest = JSON.parse(readFileSync("static/manifest.json", "utf8"));
 manifest.host_permissions = [
   ...new Set([`${new URL(apiUrl).origin}/*`, `${new URL(webUrl).origin}/*`]),
 ];
-writeFileSync("dist/manifest.json", JSON.stringify(manifest, null, 2));
+writeFileSync(`${out}/manifest.json`, JSON.stringify(manifest, null, 2));
 
 const ctx = await esbuild.context({
   entryPoints: {
@@ -34,7 +37,7 @@ const ctx = await esbuild.context({
   // that has the old one (after a reload) without clashing top-level names.
   format: "iife",
   target: "chrome120",
-  outdir: "dist",
+  outdir: out,
   minify: !watch,
   sourcemap: watch ? "inline" : false,
   define: { __API_URL__: JSON.stringify(apiUrl), __WEB_URL__: JSON.stringify(webUrl) },
