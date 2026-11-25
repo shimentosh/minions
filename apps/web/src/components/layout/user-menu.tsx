@@ -11,18 +11,9 @@ import {
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
 import { Button } from "@/components/ui/button";
-import {
-  Menu,
-  MenuGroup,
-  MenuGroupLabel,
-  MenuItem,
-  MenuPopup,
-  MenuRadioGroup,
-  MenuRadioItem,
-  MenuSeparator,
-  MenuTrigger,
-} from "@/components/ui/menu";
+import { Menu, MenuItem, MenuPopup, MenuSeparator, MenuTrigger } from "@/components/ui/menu";
 import { errorMessage } from "@/lib/api";
+import { cn } from "@/lib/cn";
 import { useSession } from "@/lib/session";
 import { type Theme, useTheme } from "@/lib/theme";
 import { toast } from "@/lib/toast";
@@ -34,6 +25,44 @@ export function initials(name: string | undefined) {
     .slice(0, 2)
     .map((p) => p[0]!.toUpperCase())
     .join("");
+}
+
+const THEMES: { value: Theme; label: string; icon: typeof Sun }[] = [
+  { value: "light", label: "Light", icon: Sun },
+  { value: "dark", label: "Dark", icon: Moon },
+  { value: "system", label: "System", icon: Monitor },
+];
+
+/** Light / dark / system as one compact segmented control; the menu stays open. */
+function ThemeSwitch({ value, onChange }: { value: Theme; onChange: (t: Theme) => void }) {
+  return (
+    <div
+      role="radiogroup"
+      aria-label="Theme"
+      className="flex items-center gap-0.5 rounded-lg border border-border bg-muted/60 p-0.5"
+    >
+      {THEMES.map(({ value: v, label, icon: Icon }) => {
+        const active = value === v;
+        return (
+          <button
+            key={v}
+            type="button"
+            role="radio"
+            aria-checked={active}
+            aria-label={label}
+            title={label}
+            onClick={() => onChange(v)}
+            className={cn(
+              "flex size-7 items-center justify-center rounded-md text-muted-foreground outline-none transition-colors hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring",
+              active && "bg-background text-foreground shadow-xs ring-1 ring-border",
+            )}
+          >
+            <Icon className="size-3.5" />
+          </button>
+        );
+      })}
+    </div>
+  );
 }
 
 export function UserMenu() {
@@ -69,20 +98,10 @@ export function UserMenu() {
             Settings
           </MenuItem>
           <MenuSeparator />
-          <MenuGroup>
-            <MenuGroupLabel>Theme</MenuGroupLabel>
-            <MenuRadioGroup value={theme} onValueChange={(v) => setTheme(v as Theme)}>
-              <MenuRadioItem value="light">
-                <Sun /> Light
-              </MenuRadioItem>
-              <MenuRadioItem value="dark">
-                <Moon /> Dark
-              </MenuRadioItem>
-              <MenuRadioItem value="system">
-                <Monitor /> System
-              </MenuRadioItem>
-            </MenuRadioGroup>
-          </MenuGroup>
+          <div className="flex items-center justify-between gap-2 px-2 py-1">
+            <span className="text-muted-foreground text-sm">Theme</span>
+            <ThemeSwitch value={theme} onChange={setTheme} />
+          </div>
           <MenuSeparator />
           <MenuItem variant="destructive" onClick={() => setConfirmEmergency(true)}>
             <ShieldAlert />

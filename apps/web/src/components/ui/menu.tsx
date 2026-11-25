@@ -124,7 +124,9 @@ function MenuCheckboxItem({
     >
       {variant === "switch" ? (
         <>
-          <span className="col-start-1">{children}</span>
+          <span className="col-start-1 flex min-w-0 items-center gap-2 [&>svg]:opacity-80">
+            {children}
+          </span>
           <MenuPrimitive.CheckboxItemIndicator
             className="inset-shadow-[0_1px_--theme(--color-black/4%)] inline-flex h-[calc(var(--thumb-size)+2px)] w-[calc(var(--thumb-size)*2-2px)] shrink-0 items-center rounded-full p-px outline-none transition-[background-color,box-shadow] duration-200 [--thumb-size:--spacing(4)] focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-1 focus-visible:ring-offset-background data-checked:bg-primary data-unchecked:bg-input data-disabled:opacity-64 sm:[--thumb-size:--spacing(3)]"
             keepMounted
@@ -150,7 +152,9 @@ function MenuCheckboxItem({
               <path d="M5.252 12.7 10.2 18.63 18.748 5.37" />
             </svg>
           </MenuPrimitive.CheckboxItemIndicator>
-          <span className="col-start-2">{children}</span>
+          <span className="col-start-2 flex min-w-0 items-center gap-2 [&>svg]:opacity-80">
+            {children}
+          </span>
         </>
       )}
     </MenuPrimitive.CheckboxItem>
@@ -187,7 +191,9 @@ function MenuRadioItem({ className, children, ...props }: MenuPrimitive.RadioIte
           <path d="M5.252 12.7 10.2 18.63 18.748 5.37" />
         </svg>
       </MenuPrimitive.RadioItemIndicator>
-      <span className="col-start-2">{children}</span>
+      <span className="col-start-2 flex min-w-0 items-center gap-2 [&>svg]:opacity-80">
+        {children}
+      </span>
     </MenuPrimitive.RadioItem>
   );
 }
