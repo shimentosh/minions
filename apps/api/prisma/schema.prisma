@@ -49,7 +49,8 @@ model User {
   recoveryKeyEnc      String?
   failedLoginCount    Int       @default(0)
   lockedUntil         DateTime?
-  autoLockMinutes     Int       @default(15)
+  /// Minutes of inactivity before the vault locks. 43200 = "until the browser closes" (the default).
+  autoLockMinutes     Int       @default(43200)
   clipboardClearSecs  Int       @default(30)
   aiEnabled           Boolean   @default(true)
   lastVisitAt         DateTime?

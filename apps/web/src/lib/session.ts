@@ -27,7 +27,7 @@ import {
   startAuthentication,
 } from "@simplewebauthn/browser";
 import { create } from "zustand";
-import { ApiError, del, get, onApiError, post, setBearerToken } from "./api";
+import { ApiError, del, get, isTauri, onApiError, post, setBearerToken } from "./api";
 import { forgetDesktopSession, rememberDesktopSession } from "./desktop";
 import { deviceInfo } from "./device";
 import { type RotationProgress, runRotation } from "./key-rotation";
@@ -292,6 +292,52 @@ function closeVault() {
   queryClient.clear();
 }
 
+/**
+ * Opens the vault with keys the browser extension holds (it was unlocked in
+ * this browser, for this account), so a reload or a new tab does not ask for
+ * the master password again. Only while the server still has this session
+ * unlocked; otherwise the master password is needed as usual.
+ */
+export async function openFromExtension(given: {
+  userId: string;
+  vaultId: string;
+  vaultKey: string;
+  privateKey: string | null;
+}): Promise<boolean> {
+  const me = await get<MeResponse>("/auth/me");
+  if (!me.session.vaultUnlocked || me.user.id !== given.userId || me.vaultId !== given.vaultId)
+    return false;
+  const keys = await get<VaultKeys>("/vault/keys");
+  // Mid-rotation the vault is under two keys: the password path finishes that.
+  if (keys.pendingProtectedVaultKey) return false;
+  const vk = fromBase64(given.vaultKey);
+  if (vk.length !== 32) {
+    wipe(vk);
+    return false;
+  }
+  wipe(vaultKey);
+  vaultKey = vk;
+  sharing = null;
+  extensionPrivateKey = null;
+  if (given.privateKey && keys.publicKey) {
+    const pkcs8 = fromBase64(given.privateKey);
+    try {
+      sharing = {
+        userId: keys.userId,
+        publicKey: keys.publicKey,
+        privateKey: await importPrivateKey(pkcs8),
+      };
+      await keepForExtension(pkcs8, keys.userId);
+    } catch {
+      sharing = null;
+    } finally {
+      wipe(pkcs8);
+    }
+  }
+  await useSession.getState().refresh();
+  return useSession.getState().status === "unlocked";
+}
+
 /** After the second factor, the master password from step one opens the vault. */
 async function openAfterSecondFactor(result: AuthResult) {
   if (!pendingStretchedKey) return;
@@ -546,6 +592,10 @@ export const useSession = create<SessionState>((set, getState) => ({
   async lock(opts) {
     closeVault();
     set((s) => ({ status: s.status === "signed-out" ? s.status : "locked" }));
+    // Locked here means locked in this browser: the extension too, or the
+    // next reload would open again from it.
+    if (!isTauri)
+      window.postMessage({ source: "minions-app", type: "lock" }, window.location.origin);
     if (!opts?.silent) await post("/vault/lock").catch(() => undefined);
   },
 

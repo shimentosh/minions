@@ -30,7 +30,9 @@ const ctx = await esbuild.context({
     offscreen: "src/offscreen.ts",
   },
   bundle: true,
-  format: "esm",
+  // Self-contained scripts: a content script can be injected again into a tab
+  // that has the old one (after a reload) without clashing top-level names.
+  format: "iife",
   target: "chrome120",
   outdir: "dist",
   minify: !watch,

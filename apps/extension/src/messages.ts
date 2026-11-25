@@ -105,6 +105,8 @@ export interface PendingSave {
   updateWorkspaceId?: string;
   /** The item to update was shared with the user, with edit access. */
   updateShared?: boolean;
+  /** Save without asking once the sign-in has gone through (the page shows an Undo). */
+  auto?: boolean;
 }
 
 export type SaveAction = "save" | "update" | "ignore" | "never";
@@ -133,6 +135,13 @@ export interface InlineMatch {
   emails: string[];
 }
 
+/** A 2FA code for the page's menu: the code and how long it has left. */
+export interface TotpCode {
+  code: string;
+  remaining: number;
+  period: number;
+}
+
 /** Preferences kept in chrome.storage.local (never a secret). */
 export interface Settings {
   /** The email offered on sign-up forms; the account email when unset. */
@@ -141,6 +150,13 @@ export interface Settings {
   inlineMenu?: boolean;
   /** Ask to save logins the user signs in with. */
   offerSave?: boolean;
+  /** Save new logins (and deliberate password changes) without asking, with an Undo. */
+  autoSave?: boolean;
+  /**
+   * "browser" (default): once unlocked, stay unlocked until the browser closes.
+   * "idle": lock after the account's auto-lock time away from the computer.
+   */
+  lockMode?: "browser" | "idle";
 }
 
 /** Popup/content → background. The vault key and secrets never travel the other way unasked. */
@@ -173,7 +189,13 @@ export type Request =
   | { type: "clipboardWritten" }
   // From the content script, with the user's own submission on that page. The
   // page's address is taken from the browser (sender.url), never from here.
-  | { type: "formSubmitted"; username: string; password: string }
+  | {
+      type: "formSubmitted";
+      username: string;
+      password: string;
+      /** From a sign-up or change-password field: a password the user meant to set. */
+      fresh?: boolean;
+    }
   | { type: "pendingSave" }
   | { type: "resolveSave"; id: string; action: SaveAction }
   /** The logins for the sender page's site (taken from the browser, not the page). */
@@ -185,12 +207,25 @@ export type Request =
   /** A strong password for a sign-up or change-password field, from the user's generator settings. */
   | { type: "inlineGenerate" }
   /** The current 2FA code of a login for the sender page's site. */
-  | { type: "inlineTotp"; itemId: string; workspaceId?: string; shared?: boolean }
+  | {
+      type: "inlineTotp";
+      itemId: string;
+      workspaceId?: string;
+      shared?: boolean;
+      /** Shown in the menu, not used: not recorded. */
+      peek?: boolean;
+    }
+  /** Undo the save or update the page's toast just announced. */
+  | { type: "undoSave"; id: string }
   /** The page's menu asks the user to unlock: open the toolbar popup. */
   | { type: "openPopup" }
   | { type: "activity" }
   // From the content script on the Minions web app's own origin only.
   | { type: "bridgeHello" }
+  /** The app is locked: the keys this extension holds, for the same account. */
+  | { type: "bridgeUnlockApp"; nonce: string; userId: string }
+  /** The app was locked by the user: lock here too. */
+  | { type: "bridgeLock" }
   | ({ type: "bridgeLink" } & BridgeLink);
 
 /** Background → content script: fill the one login the user picked. */
@@ -229,13 +264,22 @@ export function isValidRequest(msg: unknown): msg is Request {
     case "clipboardWritten":
     case "totpList":
     case "bridgeHello":
+    case "bridgeLock":
     case "inlineMatch":
     case "inlineGenerate":
     case "openPopup":
       return true;
     case "inlineFill":
-    case "inlineTotp":
       return uuid(m.itemId) && optionalId(m.workspaceId) && optionalBool(m.shared);
+    case "inlineTotp":
+      return (
+        uuid(m.itemId) &&
+        optionalId(m.workspaceId) &&
+        optionalBool(m.shared) &&
+        optionalBool(m.peek)
+      );
+    case "undoSave":
+      return uuid(m.id);
     case "usernameSeen":
       return str(m.username, 256);
     case "connect":
@@ -286,6 +330,8 @@ export function isValidRequest(msg: unknown): msg is Request {
       return (
         uuid(m.itemId) && str(m.field, 120) && optionalId(m.workspaceId) && optionalBool(m.shared)
       );
+    case "bridgeUnlockApp":
+      return uuid(m.nonce) && uuid(m.userId);
     case "bridgeLink":
       return (
         uuid(m.nonce) &&
@@ -296,7 +342,7 @@ export function isValidRequest(msg: unknown): msg is Request {
         str(m.email, 254) &&
         Number.isInteger(m.autoLockMinutes) &&
         (m.autoLockMinutes as number) >= 0 &&
-        (m.autoLockMinutes as number) <= 1440 &&
+        (m.autoLockMinutes as number) <= 43_200 &&
         base64(m.vaultKey, 64) &&
         (m.privateKey === null || base64(m.privateKey, 8192))
       );
@@ -307,7 +353,7 @@ export function isValidRequest(msg: unknown): msg is Request {
     case "saveCapture":
       return str(m.text, 20_000) && str(m.name, 200);
     case "formSubmitted":
-      return str(m.username, 256) && str(m.password, 1024);
+      return str(m.username, 256) && str(m.password, 1024) && optionalBool(m.fresh);
     case "resolveSave":
       return (
         str(m.id, 36) && UUID.test(m.id as string) && SAVE_ACTIONS.includes(m.action as SaveAction)

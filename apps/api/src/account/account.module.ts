@@ -33,10 +33,17 @@ import { PrismaService } from "../common/prisma.service";
 import { FindingsStore } from "../security/findings-store";
 import { SessionsService } from "../sessions/sessions.service";
 
+/**
+ * "Until the browser closes": 30 days. The server keeps the session unlocked
+ * that long; the keys themselves are only ever in the browser's memory, so
+ * closing the browser still locks the web app and the extension.
+ */
+const UNTIL_BROWSER_CLOSES = 43_200;
+
 class SettingsDto {
   @IsOptional() @IsString() @Length(1, 100) name?: string;
   /** 0 = lock as soon as the app is hidden or closed. */
-  @IsOptional() @IsIn([0, 1, 5, 15, 30, 60, 240]) autoLockMinutes?: number;
+  @IsOptional() @IsIn([0, 1, 5, 15, 30, 60, 240, UNTIL_BROWSER_CLOSES]) autoLockMinutes?: number;
   @IsOptional() @IsIn([15, 30, 60]) clipboardClearSeconds?: number;
   @IsOptional() @IsBoolean() aiEnabled?: boolean;
 }
@@ -53,6 +60,7 @@ class RevokeAllDto {
 }
 
 const Id = () => Param("id", new ParseUUIDPipe({ version: "4" }));
+
 
 @Injectable()
 export class DevicesService {

@@ -1346,19 +1346,37 @@ async function settingsView(state: StateResponse) {
         ),
         setting(
           "Offer to save logins",
-          "Ask after you sign in or sign up with a new password.",
+          "After you sign in or sign up with a new password.",
           toggle(prefs.offerSave !== false, "Offer to save logins", (on) =>
             saveSettings({ offerSave: on }),
+          ),
+        ),
+        setting(
+          "Save automatically",
+          "New logins save on their own once the sign-in works, with an Undo. A changed password on a sign-in form still asks.",
+          toggle(prefs.autoSave !== false, "Save automatically", (on) =>
+            saveSettings({ autoSave: on }),
+          ),
+        ),
+      ),
+    ),
+    h(
+      "div",
+      { class: "section" },
+      h("div", { class: "section-title" }, "Lock"),
+      h(
+        "div",
+        { class: "card" },
+        setting(
+          "Stay unlocked",
+          "Unlock once and the extension stays unlocked until you close the browser. Off: it locks when you are away for your auto-lock time.",
+          toggle(prefs.lockMode !== "idle", "Stay unlocked", (on) =>
+            saveSettings({ lockMode: on ? "browser" : "idle" }),
           ),
         ),
       ),
     ),
     h("div", { class: "section" }, h("div", { class: "section-title" }, "Never saved on"), sites),
-    h(
-      "p",
-      { class: "muted small" },
-      "Minions locks when you are away from the computer for your auto-lock time (set in the Minions app under Settings).",
-    ),
   );
 }
 

@@ -7,6 +7,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { errorMessage, post } from "@/lib/api";
 import { cn } from "@/lib/cn";
+import { useUnlockFromExtension } from "@/lib/extension-bridge";
 import { checkBackupCode, requestPasswordReset, useSession } from "@/lib/session";
 
 function AuthLayout({
@@ -852,6 +853,8 @@ export function SignInScreen() {
 }
 
 export function LockScreen() {
+  // Unlocked in the extension in this browser: open from it, no password.
+  useUnlockFromExtension();
   const me = useSession((s) => s.me);
   const unlock = useSession((s) => s.unlock);
   const logout = useSession((s) => s.logout);

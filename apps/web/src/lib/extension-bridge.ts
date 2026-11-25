@@ -1,7 +1,7 @@
 import { useEffect } from "react";
 import { create } from "zustand";
 import { errorMessage, isTauri, post } from "./api";
-import { keysForExtension, useSession } from "./session";
+import { keysForExtension, openFromExtension, useSession } from "./session";
 import { toast } from "./toast";
 
 /**
@@ -74,6 +74,14 @@ function isHello(d: Record<string, unknown>): ExtensionHello | null {
 /** The extension said no, with a reason written for the user. */
 class ExtensionRefused extends Error {}
 
+type ExtensionKeys = {
+  userId: string;
+  vaultId: string;
+  vaultKey: string;
+  privateKey: string | null;
+};
+let keysWaiter: ((k: ExtensionKeys | null) => void) | null = null;
+
 let linkedWaiter: ((r: { ok: boolean; error?: string }) => void) | null = null;
 
 function onMessage(e: MessageEvent) {
@@ -87,6 +95,22 @@ function onMessage(e: MessageEvent) {
   } else if (d.type === "linked") {
     linkedWaiter?.({ ok: d.ok === true, error: typeof d.error === "string" ? d.error : undefined });
     linkedWaiter = null;
+  } else if (d.type === "keys") {
+    keysWaiter?.(
+      d.ok === true &&
+        typeof d.userId === "string" &&
+        typeof d.vaultId === "string" &&
+        typeof d.vaultKey === "string" &&
+        (d.privateKey === null || typeof d.privateKey === "string")
+        ? {
+            userId: d.userId,
+            vaultId: d.vaultId,
+            vaultKey: d.vaultKey,
+            privateKey: d.privateKey as string | null,
+          }
+        : null,
+    );
+    keysWaiter = null;
   }
 }
 
@@ -157,8 +181,10 @@ export async function connectExtension(opts: { quiet?: boolean } = {}): Promise<
   }
 }
 
-/** At most one silent unlock a minute, so a refusing extension cannot cause a loop of sessions. */
-const AUTO_INTERVAL_MS = 60_000;
+/** At most one silent unlock every 15 s, so a refusing extension cannot cause a loop of sessions. */
+const AUTO_INTERVAL_MS = 15_000;
+/** When the user asked from the extension: soon, but never in a tight loop. */
+const ASKED_INTERVAL_MS = 5_000;
 let lastAutoConnect = 0;
 
 /**
@@ -182,9 +208,58 @@ export function useExtensionAutoConnect() {
   useEffect(() => {
     if (status !== "unlocked" || linking || !extension || !userId) return;
     if (extension.status === "unlocked" && extension.linkedUserId === userId) return;
-    if (extension.linkedUserId !== userId || Date.now() - lastAutoConnect < AUTO_INTERVAL_MS)
-      return;
+    if (extension.linkedUserId !== userId) return;
+    // The user just pressed "Unlock with Minions app": answer at once, and say
+    // what went wrong if it does. Otherwise a quiet unlock at most once a minute.
+    const asked = extension.wantsConnect;
+    if (Date.now() - lastAutoConnect < (asked ? ASKED_INTERVAL_MS : AUTO_INTERVAL_MS)) return;
     lastAutoConnect = Date.now();
-    void connectExtension({ quiet: true });
+    void connectExtension({ quiet: !asked });
   }, [status, linking, extension, userId]);
+}
+
+let askedNonce: string | null = null;
+
+/** Asks the extension for the keys it holds; null if it will not give them. */
+function askExtensionForKeys(nonce: string, userId: string): Promise<ExtensionKeys | null> {
+  return new Promise((resolve) => {
+    const timer = window.setTimeout(() => {
+      keysWaiter = null;
+      resolve(null);
+    }, 5_000);
+    keysWaiter = (k) => {
+      window.clearTimeout(timer);
+      resolve(k);
+    };
+    window.postMessage(
+      { source: FROM_APP, type: "unlock-me", nonce, userId },
+      window.location.origin,
+    );
+  });
+}
+
+/**
+ * Mounted on the lock screen. When the extension in this browser is unlocked
+ * for the same account, the app opens from it: unlock once, in either place,
+ * and both stay open until the browser closes or one of them is locked.
+ */
+export function useUnlockFromExtension() {
+  const extension = useExtensionBridge((s) => s.extension);
+  const status = useSession((s) => s.status);
+  const me = useSession((s) => s.me);
+
+  useEffect(() => {
+    if (status === "locked" && !isTauri) ping();
+  }, [status]);
+
+  useEffect(() => {
+    if (status !== "locked" || !me || !extension || isTauri) return;
+    if (extension.status !== "unlocked" || extension.linkedUserId !== me.user.id) return;
+    // Once per hello: a refusal is not retried in a loop.
+    if (askedNonce === extension.nonce) return;
+    askedNonce = extension.nonce;
+    void askExtensionForKeys(extension.nonce, me.user.id).then(async (keys) => {
+      if (keys) await openFromExtension(keys).catch(() => false);
+    });
+  }, [status, me, extension]);
 }

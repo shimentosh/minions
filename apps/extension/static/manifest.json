@@ -31,7 +31,8 @@
     "offscreen",
     "clipboardWrite",
     "favicon",
-    "idle"
+    "idle",
+    "scripting"
   ],
   "host_permissions": [],
   "content_scripts": [

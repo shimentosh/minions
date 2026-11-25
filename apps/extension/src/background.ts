@@ -87,6 +87,8 @@ const ACTIVE_WITHIN_SECONDS = 60;
 const SLEPT_AFTER_MS = 3 * 60_000;
 /** How long a username from step one of a two-step sign-in is kept for the password step. */
 const USERNAME_TTL_MS = 5 * 60_000;
+/** How long a save can be undone from the page. */
+const UNDO_TTL_MS = 2 * 60_000;
 
 interface SessionData {
   token?: string;
@@ -105,6 +107,18 @@ interface SessionData {
   /** When the auto-lock check last ran, to notice the computer sleeping. */
   lastTick?: number;
   pending?: PendingSave & { password: string; createdAt: number };
+  /** The last save or update, for a minute or two, so the page's toast can undo it. */
+  lastSaved?: {
+    id: string;
+    host: string;
+    action: "saved" | "updated";
+    itemId: string;
+    workspaceId?: string;
+    shared?: boolean;
+    /** The fields as they were before an update (ciphertext as stored). */
+    previous?: ItemField[];
+    at: number;
+  };
   /** Step one of a two-step sign-in on this host (memory only, never a password). */
   recentUsername?: { host: string; username: string; at: number };
   /** The user asked to sign in through the web app; it may ask them to approve until then. */
@@ -255,6 +269,8 @@ async function openVault(stretchedKey: Uint8Array<ArrayBuffer>, keys: VaultKeys)
   pk?.fill(0);
   await persistSignIn();
   await scheduleLock();
+  // An app tab that is locked can open from here now.
+  for (const t of await appTabs()) if (t.id !== undefined) await pingApp(t.id);
 }
 
 async function lockLocally() {
@@ -293,6 +309,14 @@ async function checkAutoLock() {
   }
   const now = Date.now();
   const minutes = s.autoLockMinutes ?? 15;
+  // "Stay unlocked while the browser is open" (the default): no idle lock, and
+  // the server's unlock window is kept open for as long as the browser runs.
+  // The vault key still lives in memory only, so closing the browser locks.
+  if (minutes > 0 && (await settings()).lockMode !== "idle") {
+    await session.set({ lastTick: now, lastActivity: now });
+    await api("/vault/heartbeat", { method: "POST" }).catch(() => undefined);
+    return;
+  }
   const awake = now - (s.lastTick ?? now) < SLEPT_AFTER_MS;
   let last = s.lastActivity ?? 0;
   const active =
@@ -307,6 +331,27 @@ async function checkAutoLock() {
   if (active) await api("/vault/heartbeat", { method: "POST" }).catch(() => undefined);
 }
 
+/**
+ * Chrome does not put a freshly installed or reloaded extension's content
+ * script into tabs that are already open. The Minions app's tabs need it to
+ * unlock this extension, so it is added to them here (the only site this
+ * extension has access to).
+ */
+chrome.runtime.onInstalled.addListener(async () => {
+  for (const t of await appTabs()) {
+    if (t.id === undefined) continue;
+    // A tab that already has a live copy (it loaded after the install) keeps
+    // just that one: two would both answer the app.
+    const live = await chrome.tabs
+      .sendMessage(t.id, { type: "minions-alive" }, { frameId: 0 })
+      .catch(() => false);
+    if (live === true) continue;
+    await chrome.scripting
+      .executeScript({ target: { tabId: t.id }, files: ["content.js"] })
+      .catch(() => undefined);
+  }
+});
+
 chrome.alarms.onAlarm.addListener(async (alarm) => {
   if (alarm.name === CLIPBOARD_ALARM) {
     await clearClipboard().catch(() => undefined);
@@ -320,6 +365,47 @@ async function getStatus(): Promise<Status> {
   const s = await session.get();
   if (!token) return s.status === "two-factor" ? "two-factor" : "signed-out";
   return s.status ?? "locked";
+}
+
+// ─── One-time nonces for the app bridge ──────────────────────────────────────
+// Read, changed and written back in turn: two hellos at once must not each
+// write their own list over the other's (a nonce would vanish and the app's
+// next request be refused as expired).
+
+/** Runs calls one after another, each after the last has finished. */
+function queue() {
+  let last: Promise<unknown> = Promise.resolve();
+  return <T>(fn: () => Promise<T>): Promise<T> => {
+    const run = last.then(fn, fn);
+    last = run.catch(() => undefined);
+    return run;
+  };
+}
+const inTurn = queue();
+/** Links from the app, one at a time: two at once could revoke each other's session. */
+const linkInTurn = queue();
+
+function issueNonce(): Promise<string> {
+  return inTurn(async () => {
+    const now = Date.now();
+    const nonce = crypto.randomUUID();
+    const { bridgeNonces = [] } = await session.get();
+    const kept = bridgeNonces.filter((x) => now - x.at < CONNECT_TTL_MS).slice(-7);
+    await session.set({ bridgeNonces: [...kept, { n: nonce, at: now }] });
+    return nonce;
+  });
+}
+
+/** Uses up a nonce; false if it was never given out, already used, or too old. */
+function takeNonce(n: string): Promise<boolean> {
+  return inTurn(async () => {
+    const now = Date.now();
+    const { bridgeNonces = [] } = await session.get();
+    const hit = bridgeNonces.find((x) => x.n === n && now - x.at < CONNECT_TTL_MS);
+    if (!hit) return false;
+    await session.set({ bridgeNonces: bridgeNonces.filter((x) => x !== hit) });
+    return true;
+  });
 }
 
 /** Ends another session (a replaced one, or one the web app minted that is not needed). */
@@ -507,6 +593,46 @@ async function fillTab(
   await recordUsage(opened, "item.autofilled");
 }
 
+/** The stored fields of an item, ready to send back (ciphertext untouched). */
+function storedFields(item: VaultItemDetail): ItemField[] {
+  return item.fields.map((f) => ({
+    key: f.key,
+    value: f.value,
+    sensitive: f.sensitive,
+    ...(f.label ? { label: f.label, kind: f.kind } : {}),
+  }));
+}
+
+/** Saves an item's fields as given, keeping everything else about it. */
+async function writeItem(o: OpenedItem, fields: ItemField[], password: string) {
+  const { item } = o;
+  // Workspace and shared items: no personal projects, no reuse fingerprint.
+  const team = !!o.workspaceId || !!o.shared;
+  await api(itemPath(item.id, o.workspaceId, o.shared), {
+    method: "PUT",
+    body: {
+      id: item.id,
+      type: item.type,
+      name: item.name,
+      description: item.description,
+      projectId: team ? null : (item.project?.id ?? null),
+      collectionId: item.collection?.id ?? null,
+      favorite: item.favorite,
+      tags: item.tags,
+      usedByProjectIds: team ? [] : item.usedBy.map((p) => p.id),
+      fields,
+      revision: item.revision,
+      signals: {
+        passwordStrength: estimateStrength(password).score,
+        // Reuse detection compares personal passwords only.
+        ...(team
+          ? {}
+          : { passwordFingerprint: await secretFingerprint(await vaultKey(), password) }),
+      },
+    },
+  });
+}
+
 async function buildLogin(
   host: string,
   url: string,
@@ -632,6 +758,7 @@ async function handle(req: Request, sender: chrome.runtime.MessageSender): Promi
     } catch {
       /* not a page */
     }
+    const appOnly = ["bridgeHello", "bridgeLink", "bridgeUnlockApp", "bridgeLock"];
     const allowed = [
       "formSubmitted",
       "pendingSave",
@@ -640,10 +767,11 @@ async function handle(req: Request, sender: chrome.runtime.MessageSender): Promi
       "inlineFill",
       "inlineGenerate",
       "inlineTotp",
+      "undoSave",
       "usernameSeen",
       "openPopup",
     ];
-    if (origin === WEB_ORIGIN) allowed.push("bridgeHello", "bridgeLink");
+    if (origin === WEB_ORIGIN) allowed.push(...appOnly);
     if (!allowed.includes(req.type)) throw new Error("Not allowed");
   } else await session.set({ lastActivity: Date.now() });
   // For content scripts: the page's host as the browser reports it, never as the page claims.
@@ -780,9 +908,13 @@ async function handle(req: Request, sender: chrome.runtime.MessageSender): Promi
       const secret = await decryptField(opened, "totp");
       opened.key.fill(0);
       if (!secret) throw new Error("No 2FA secret on this login");
-      await session.set({ lastActivity: Date.now() });
-      await recordUsage(opened, "item.totp_generated");
-      return (await generateTotp(secret)).code;
+      // A code shown in the menu is not a use; filling it is.
+      if (!req.peek) {
+        await session.set({ lastActivity: Date.now() });
+        await recordUsage(opened, "item.totp_generated");
+      }
+      const { code, remaining, period } = await generateTotp(secret);
+      return { code, remaining, period };
     }
     case "inlineFill":
       // Into the tab that asked; fillTab still checks its address against the item.
@@ -927,9 +1059,7 @@ async function handle(req: Request, sender: chrome.runtime.MessageSender): Promi
     case "bridgeHello": {
       const s = await session.get();
       const now = Date.now();
-      const nonce = crypto.randomUUID();
-      const nonces = (s.bridgeNonces ?? []).filter((x) => now - x.at < CONNECT_TTL_MS).slice(-4);
-      await session.set({ bridgeNonces: [...nonces, { n: nonce, at: now }] });
+      const nonce = await issueNonce();
       const saved = await persisted.get();
       const { clientDeviceId, name } = await deviceInfo();
       return {
@@ -940,59 +1070,31 @@ async function handle(req: Request, sender: chrome.runtime.MessageSender): Promi
         device: { clientDeviceId, name },
       } satisfies BridgeHello;
     }
-    case "bridgeLink": {
+    case "bridgeLink":
+      return linkInTurn(() => bridgeLink(req));
+    case "bridgeUnlockApp": {
+      // The Minions app in this browser is locked and asks for the keys this
+      // extension holds: the same account only, with a nonce from a hello.
+      if (!(await takeNonce(req.nonce))) throw new Error("This request expired. Try again.");
       const s = await session.get();
-      const now = Date.now();
-      const nonces = s.bridgeNonces ?? [];
-      const hit = nonces.find((x) => x.n === req.nonce && now - x.at < CONNECT_TTL_MS);
-      if (!hit) {
-        await discardOffered(req.token);
-        throw new Error("This connection request expired. Try again.");
-      }
-      await session.set({ bridgeNonces: nonces.filter((x) => x !== hit) });
-      const saved = await persisted.get();
-      if ((await getStatus()) === "unlocked" && saved?.userId === req.userId) {
-        // Another app tab got there first: this extra session is not needed.
-        await discardOffered(req.token);
-        return "already";
-      }
-      // The session must be real, unlocked, and the account the keys claim to be for.
-      const me = await api<MeResponse>("/auth/me", { token: req.token }).catch(() => null);
-      const vk = fromBase64(req.vaultKey);
-      if (
-        !me ||
-        me.user.id !== req.userId ||
-        me.vaultId !== req.vaultId ||
-        !me.session.vaultUnlocked ||
-        vk.length !== 32
-      ) {
-        vk.fill(0);
-        await discardOffered(req.token);
-        throw new Error("The connection could not be verified");
-      }
-      vk.fill(0);
-      // Replaces whatever was here: this account's old session, or another account.
-      const old = s.token ?? saved?.token;
-      if (old && old !== req.token) await revokeToken(old);
-      await chrome.storage.session.clear();
-      await chrome.action.setBadgeText({ text: "" });
-      await session.set({
-        token: req.token,
-        email: me.user.email,
-        name: me.user.name,
-        userId: me.user.id,
-        vaultId: me.vaultId,
-        vaultKey: req.vaultKey,
-        ...(req.privateKey ? { privateKey: req.privateKey } : {}),
-        status: "unlocked",
-        autoLockMinutes: me.user.autoLockMinutes,
-        lastActivity: now,
-      });
-      await persistSignIn();
-      await scheduleLock();
-      stateChanged();
-      return "linked";
+      if (s.status !== "unlocked" || !s.vaultKey || !s.vaultId || s.userId !== req.userId)
+        throw new Error("The extension is not unlocked for this account");
+      await session.set({ lastActivity: Date.now() });
+      return {
+        userId: s.userId,
+        vaultId: s.vaultId,
+        vaultKey: s.vaultKey,
+        privateKey: s.privateKey ?? null,
+      };
     }
+    case "bridgeLock":
+      // Locked in the app: locked here too, or the app would reopen from here.
+      if ((await session.get()).status === "unlocked") {
+        await api("/vault/lock", { method: "POST" }).catch(() => undefined);
+        await lockLocally();
+        stateChanged();
+      }
+      return null;
     case "generate":
       return generatePassword(req.options);
     case "clipboardWritten":
@@ -1055,7 +1157,8 @@ async function handle(req: Request, sender: chrome.runtime.MessageSender): Promi
       const { status, recentUsername } = await session.get();
       const host = senderHost;
       if (status !== "unlocked" || !host || !req.password) return null;
-      if ((await settings()).offerSave === false) return null;
+      const prefs = await settings();
+      if (prefs.offerSave === false) return null;
       if ((await neverSaveHosts()).includes(host)) return null;
       // A password page with no username on it: take the one from step one.
       const username =
@@ -1084,6 +1187,10 @@ async function handle(req: Request, sender: chrome.runtime.MessageSender): Promi
         username,
         password: req.password,
         createdAt: Date.now(),
+        // Saved without asking: a new login, or a password the user deliberately
+        // changed (sign-up or change-password form). A different password typed
+        // into a sign-in form may be a typo, so that one still asks.
+        auto: prefs.autoSave !== false && (!same || !!req.fresh),
         ...(same
           ? {
               updateItemId: same.id,
@@ -1135,59 +1242,118 @@ async function handle(req: Request, sender: chrome.runtime.MessageSender): Promi
           pending.updateShared,
         );
         const { item, key } = opened;
-        // Workspace and shared items: no personal projects, no reuse fingerprint.
-        const team = !!pending.updateWorkspaceId || !!pending.updateShared;
-        const fields = item.fields.map((f) => ({
-          key: f.key,
-          value: f.value,
-          sensitive: f.sensitive,
-          ...(f.label ? { label: f.label, kind: f.kind } : {}),
-        }));
+        const previous = storedFields(item);
         const pw = {
           key: "password",
           value: await encryptString(key, pending.password, aad.field(item.id, "password")),
           sensitive: true,
         };
-        const next = fields.some((f) => f.key === "password")
-          ? fields.map((f) => (f.key === "password" ? pw : f))
-          : [...fields, pw];
-        await api(itemPath(item.id, pending.updateWorkspaceId, pending.updateShared), {
-          method: "PUT",
-          body: {
-            id: item.id,
-            type: item.type,
-            name: item.name,
-            description: item.description,
-            projectId: team ? null : (item.project?.id ?? null),
-            collectionId: item.collection?.id ?? null,
-            favorite: item.favorite,
-            tags: item.tags,
-            usedByProjectIds: team ? [] : item.usedBy.map((p) => p.id),
-            fields: next,
-            revision: item.revision,
-            signals: {
-              passwordStrength: estimateStrength(pending.password).score,
-              // Reuse detection compares personal passwords only.
-              ...(team
-                ? {}
-                : {
-                    passwordFingerprint: await secretFingerprint(
-                      await vaultKey(),
-                      pending.password,
-                    ),
-                  }),
-            },
+        const next = previous.some((f) => f.key === "password")
+          ? previous.map((f) => (f.key === "password" ? pw : f))
+          : [...previous, pw];
+        await writeItem(opened, next, pending.password);
+        key.fill(0);
+        await session.set({
+          lastSaved: {
+            id: pending.id,
+            host: pending.host,
+            action: "updated",
+            itemId: item.id,
+            ...(pending.updateWorkspaceId ? { workspaceId: pending.updateWorkspaceId } : {}),
+            ...(pending.updateShared ? { shared: true } : {}),
+            previous,
+            at: Date.now(),
           },
         });
-        key.fill(0);
         return "updated";
       }
-      await api("/vault/items", {
-        body: await buildLogin(pending.host, pending.url, pending.username, pending.password),
+      const login = await buildLogin(pending.host, pending.url, pending.username, pending.password);
+      await api("/vault/items", { body: login });
+      await session.set({
+        lastSaved: {
+          id: pending.id,
+          host: pending.host,
+          action: "saved",
+          itemId: login.id!,
+          at: Date.now(),
+        },
       });
       return "saved";
     }
+    case "undoSave": {
+      const { lastSaved } = await session.get();
+      if (!lastSaved || lastSaved.id !== req.id || Date.now() - lastSaved.at > UNDO_TTL_MS)
+        throw new Error("This can no longer be undone");
+      if (fromContent && lastSaved.host !== senderHost) throw new Error("Not allowed");
+      await session.clear(["lastSaved"]);
+      if (lastSaved.action === "saved") {
+        // Into the trash, where it can still be restored in the app.
+        await api(`/vault/items/${lastSaved.itemId}`, { method: "DELETE" });
+        return "removed";
+      }
+      const opened = await openItem(lastSaved.itemId, lastSaved.workspaceId, lastSaved.shared);
+      const previous = lastSaved.previous ?? [];
+      const old = previous.find((f) => f.key === "password");
+      const oldPassword = old
+        ? await decryptString(opened.key, old.value, aad.field(opened.item.id, "password"))
+        : "";
+      await writeItem(opened, previous, oldPassword);
+      opened.key.fill(0);
+      return "restored";
+    }
   }
+}
+
+/** The app hands this extension a session of its own and the vault keys. */
+async function bridgeLink(req: Extract<Request, { type: "bridgeLink" }>) {
+  const s = await session.get();
+  const now = Date.now();
+  if (!(await takeNonce(req.nonce))) {
+    await discardOffered(req.token);
+    throw new Error("This connection request expired. Try again.");
+  }
+  const saved = await persisted.get();
+  if ((await getStatus()) === "unlocked" && saved?.userId === req.userId) {
+    // Another app tab got there first: this extra session is not needed.
+    await discardOffered(req.token);
+    return "already";
+  }
+  // The session must be real, unlocked, and the account the keys claim to be for.
+  const me = await api<MeResponse>("/auth/me", { token: req.token }).catch(() => null);
+  const vk = fromBase64(req.vaultKey);
+  if (
+    !me ||
+    me.user.id !== req.userId ||
+    me.vaultId !== req.vaultId ||
+    !me.session.vaultUnlocked ||
+    vk.length !== 32
+  ) {
+    vk.fill(0);
+    await discardOffered(req.token);
+    throw new Error("The connection could not be verified");
+  }
+  vk.fill(0);
+  // Replaces whatever was here: this account's old session, or another account.
+  const old = s.token ?? saved?.token;
+  if (old && old !== req.token) await revokeToken(old);
+  await chrome.storage.session.clear();
+  await chrome.action.setBadgeText({ text: "" });
+  await session.set({
+    token: req.token,
+    email: me.user.email,
+    name: me.user.name,
+    userId: me.user.id,
+    vaultId: me.vaultId,
+    vaultKey: req.vaultKey,
+    ...(req.privateKey ? { privateKey: req.privateKey } : {}),
+    status: "unlocked",
+    autoLockMinutes: me.user.autoLockMinutes,
+    lastActivity: now,
+  });
+  await persistSignIn();
+  await scheduleLock();
+  stateChanged();
+  return "linked";
 }
 
 chrome.runtime.onMessage.addListener(

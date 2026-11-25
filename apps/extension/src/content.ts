@@ -21,6 +21,7 @@ import type {
   Request,
   Response,
   SaveAction,
+  TotpCode,
 } from "./messages";
 
 declare const __WEB_URL__: string;
@@ -123,7 +124,12 @@ function fieldsForFill(anchor: HTMLInputElement | null) {
  * What the user just submitted. On a sign-up or change-password form the
  * password to keep is the new one, not the current one or its confirmation.
  */
-function submitted(): { username: string; password: string } | null {
+function submitted(): {
+  username: string;
+  password: string;
+  field: HTMLInputElement;
+  fresh: boolean;
+} | null {
   const pws = passwords().filter((p) => p.value);
   if (!pws.length) return null;
   const fresh = pws.filter(isNew);
@@ -141,7 +147,13 @@ function submitted(): { username: string; password: string } | null {
     usernameFor(pw)?.value ||
     pw.form?.querySelector<HTMLInputElement>('input[autocomplete~="username"]')?.value ||
     "";
-  return { username: username.trim(), password: pw.value };
+  return {
+    username: username.trim(),
+    password: pw.value,
+    field: pw,
+    // A sign-up or change-password field: a password the user meant to set.
+    fresh: fresh.length > 0 || isNewPasswordField(pw),
+  };
 }
 
 function setValue(input: HTMLInputElement, value: string) {
@@ -330,6 +342,9 @@ const MENU_CSS = `
   .pw .d{color:#2563eb}.pw .s{color:#db2777}
   @media (prefers-color-scheme:dark){.pw .d{color:#60a5fa}.pw .s{color:#f472b6}}
   .ic{flex:none;display:grid;place-items:center;width:28px;height:28px;border-radius:8px;background:var(--hover);color:var(--fg)}
+  .code{flex:none;font:600 15px/1 ui-monospace,SFMono-Regular,Menlo,monospace;letter-spacing:1px}
+  .secs{flex:none;min-width:30px;text-align:center;font-size:11px;font-weight:600;color:var(--muted);border:1px solid var(--line);border-radius:999px;padding:2px 6px}
+  .secs.low{color:#dc2626;border-color:rgba(220,38,38,.35)}
   .badge{flex:none;font-size:11px;color:var(--muted);border:1px solid var(--line);border-radius:999px;padding:1px 7px;max-width:96px}
   .go{flex:none;font-size:11px;color:var(--muted);opacity:0}
   .item:hover .go,.item.on .go{opacity:1}
@@ -369,6 +384,8 @@ interface Menu {
   active: number;
   /** Only a note (locked, nothing saved): shown above the field, out of the way. */
   note: boolean;
+  /** Timers to stop when it closes (live 2FA codes). */
+  cleanup: (() => void)[];
 }
 
 let menu: Menu | null = null;
@@ -391,7 +408,9 @@ async function inlineMatch(): Promise<InlineMatch | null> {
 }
 
 function closeMenu() {
-  menu?.host.remove();
+  if (!menu) return;
+  for (const stop of menu.cleanup) stop();
+  menu.host.remove();
   menu = null;
 }
 
@@ -530,18 +549,45 @@ function rowsFor(m: Menu, data: InlineMatch): Row[] {
   if (m.kind === "otp")
     return data.items
       .filter((it) => it.hasTotp)
-      .map((it) => ({
-        el: rowButton(svg(TIMER_SVG, "ic"), `2FA code for ${it.name}`, it.username, [
-          el("span", "go", "Fill"),
-        ]),
-        match: null,
-        run: async () => {
-          const r = await call<string>({ type: "inlineTotp", ...ref(it) });
-          if (!r?.ok) return r?.error ?? "Minions did not answer. Reload the page.";
-          fillCode(anchor, r.data);
-          return null;
-        },
-      }));
+      .map((it) => {
+        // The live code, shown before it is used; refreshed as it runs out.
+        const code = el("span", "code", "··· ···");
+        const secs = el("span", "secs", "");
+        let left = 0;
+        const peek = async () => {
+          const r = await send<TotpCode>({ type: "inlineTotp", ...ref(it), peek: true });
+          if (!r) return;
+          const mid = r.code.length === 8 ? 4 : 3;
+          code.textContent = `${r.code.slice(0, mid)} ${r.code.slice(mid)}`;
+          left = r.remaining;
+          secs.textContent = `${left}s`;
+          secs.classList.toggle("low", left <= 5);
+        };
+        void peek();
+        const tick = window.setInterval(() => {
+          left--;
+          if (left <= 0) return void peek();
+          secs.textContent = `${left}s`;
+          secs.classList.toggle("low", left <= 5);
+        }, 1000);
+        m.cleanup.push(() => window.clearInterval(tick));
+        const row = rowButton(svg(TIMER_SVG, "ic"), it.name, it.username ?? "2FA code", [
+          code,
+          secs,
+        ]);
+        row.title = "Fill this code";
+        return {
+          el: row,
+          match: null,
+          run: async () => {
+            // Fetched again when used, so the code is current and the use recorded.
+            const r = await call<TotpCode>({ type: "inlineTotp", ...ref(it) });
+            if (!r?.ok) return r?.error ?? "Minions did not answer. Reload the page.";
+            fillCode(anchor, r.data.code);
+            return null;
+          },
+        };
+      });
 
   if (m.kind === "signup-email")
     return data.emails.map((email) => ({
@@ -648,6 +694,7 @@ function buildMenu(anchor: HTMLInputElement, kind: FieldKind, data: InlineMatch)
     shown: [],
     active: -1,
     note: showNote,
+    cleanup: [],
   };
 
   if (showNote) {
@@ -683,19 +730,36 @@ function buildMenu(anchor: HTMLInputElement, kind: FieldKind, data: InlineMatch)
   return m;
 }
 
-async function openMenu(anchor: HTMLInputElement, kind: FieldKind) {
+/** `auto`: opened by Minions itself (a 2FA field appeared), not by the user focusing it. */
+async function openMenu(anchor: HTMLInputElement, kind: FieldKind, auto = false) {
   if (ON_APP || menuDismissed || filling) return;
   if (menu?.anchor === anchor) return;
   const ticket = ++opening;
   const data = await inlineMatch();
   // The user may have moved on while the background answered.
-  if (ticket !== opening || document.activeElement !== anchor || !data?.enabled) return;
+  if (ticket !== opening || !data?.enabled) return;
+  if (!auto && document.activeElement !== anchor) return;
+  if (auto && (menu || anchor.value)) return;
   closeMenu();
   menu = buildMenu(anchor, kind, data);
   if (!menu) return;
   placeMenu();
   // Typed into while the menu was on its way: treat it as typing.
   if (anchor.value && menu.rows.length) filterMenu();
+}
+
+/** 2FA fields already offered on their own, so each pops up once. */
+const offered = new WeakSet<HTMLInputElement>();
+
+/** A 2FA code field has appeared: offer the code without waiting for a click. */
+function scanForCodeField() {
+  if (menu || menuDismissed) return;
+  const field = [...document.querySelectorAll<HTMLInputElement>("input")].find(
+    (i) => !offered.has(i) && !i.value && classify(i) === "otp",
+  );
+  if (!field) return;
+  offered.add(field);
+  void openMenu(field, "otp", true);
 }
 
 function maybeOpen(t: EventTarget | null) {
@@ -745,6 +809,21 @@ if (!ON_APP) {
   addEventListener("resize", schedulePlace, { passive: true });
   // A field focused before this script ran (autofocus on a sign-in page).
   maybeOpen(document.activeElement);
+  // 2FA steps often appear without a page load (single-page sign-ins).
+  scanForCodeField();
+  let scanTimer = 0;
+  new MutationObserver(() => {
+    window.clearTimeout(scanTimer);
+    scanTimer = window.setTimeout(scanForCodeField, 400);
+  }).observe(document.documentElement, { childList: true, subtree: true });
+  // A menu opened on its own closes when the user clicks anywhere else.
+  document.addEventListener(
+    "mousedown",
+    (e) => {
+      if (menu && e.target !== menu.anchor && !e.composedPath().includes(menu.host)) closeMenu();
+    },
+    true,
+  );
 }
 
 // ─── Fill requests from the background ───────────────────────────────────────
@@ -756,6 +835,11 @@ chrome.runtime.onMessage.addListener(
     sendResponse,
   ) => {
     if (sender.id !== chrome.runtime.id) return;
+    // The background checking for a live copy before adding another.
+    if ((msg as { type?: string })?.type === "minions-alive") {
+      sendResponse(true);
+      return;
+    }
     if (msg?.type === "minions-bridge-hello") {
       if (ON_APP) void hello();
       return;
@@ -786,6 +870,8 @@ chrome.runtime.onMessage.addListener(
 
 let lastReported = "";
 let lastUsername = "";
+/** The password field submitted on this page: its going away means the sign-in went through. */
+let submittedField: HTMLInputElement | null = null;
 
 function report() {
   // The master password typed into Minions itself is never a login to save.
@@ -796,10 +882,12 @@ function report() {
   const key = `${s.username}\u0000${s.password.length}:${s.password.slice(-1)}`;
   if (key === lastReported) return;
   lastReported = key;
+  submittedField = s.field;
   void send({
     type: "formSubmitted",
     username: s.username.slice(0, 256),
     password: s.password.slice(0, 1024),
+    fresh: s.fresh,
   }).then(() => setTimeout(showPrompt, 300));
 }
 
@@ -887,20 +975,124 @@ const PROMPT_CSS = `
   button.b.ghost{color:var(--fg)}
   button.b.ghost:hover,button.b.link:hover{background:var(--hover)}
   button.b.link{color:var(--muted);font-weight:500;font-size:12px;padding:7px 8px}
-  .done{display:flex;align-items:center;gap:10px;padding:14px;font-weight:600}
-  .done .ok{display:grid;place-items:center;width:28px;height:28px;border-radius:999px;background:#10b981;color:#fff}
+  .done{display:flex;align-items:center;gap:10px;padding:12px 10px 12px 14px;font-weight:600}
+  .done .titles .sub{font-weight:400}
+  .done .ok{flex:none;display:grid;place-items:center;width:28px;height:28px;border-radius:999px;background:#10b981;color:#fff}
   .err{padding:8px 14px 0}
   button.b[disabled]{opacity:.55;cursor:default}
 `;
 
+/** Waits up to a few seconds for the submitted form to go away (the sign-in worked). */
+async function formGone(field: HTMLInputElement) {
+  for (let i = 0; i < 14; i++) {
+    if (!field.isConnected || !visible(field)) return true;
+    await new Promise((r) => setTimeout(r, 250));
+  }
+  return false;
+}
+
+let prompting = false;
+
 async function showPrompt() {
-  if (ON_APP) return;
-  const pending = await send<PendingSave>({ type: "pendingSave" });
-  if (!pending || document.getElementById("minions-save-prompt")) return;
+  if (ON_APP || prompting || document.getElementById("minions-save-prompt")) return;
+  prompting = true;
+  try {
+    const pending = await send<PendingSave>({ type: "pendingSave" });
+    if (!pending) return;
+    if (pending.auto) {
+      // Saved on its own once the sign-in went through: on a new page, or the
+      // form gone from this one. Still on the form (wrong password?): ask.
+      const field = submittedField;
+      if (!field || (await formGone(field))) return await autoSave(pending);
+    }
+    askToSave(pending);
+  } finally {
+    prompting = false;
+  }
+}
+
+function toastHost() {
   const { host, root } = overlay("minions-save-prompt", PROMPT_CSS);
   host.style.top = "16px";
   host.style.left = "auto";
   host.style.right = "16px";
+  return { host, root };
+}
+
+/** Saves without asking, then says so with an Undo for a few seconds. */
+async function autoSave(pending: PendingSave) {
+  const isUpdate = !!pending.updateItemId;
+  const r = await call<string | null>({
+    type: "resolveSave",
+    id: pending.id,
+    action: isUpdate ? "update" : "save",
+  });
+  // Another page of this tab got there first, or it failed: ask instead.
+  if (!r?.ok) return askToSave(pending, r?.error);
+  if (r.data !== "saved" && r.data !== "updated") return;
+  matchCache = null;
+  const { host, root } = toastHost();
+  const undo = el("button", "b ghost", "Undo");
+  undo.type = "button";
+  const close = el("button", "x", "×");
+  close.setAttribute("aria-label", "Close");
+  const card = el(
+    "div",
+    "card prompt",
+    el(
+      "div",
+      "done",
+      svg(CHECK_SVG, "ok"),
+      el(
+        "div",
+        "titles",
+        el("div", "title trunc", isUpdate ? "Password updated in Minions" : "Saved to Minions"),
+        el(
+          "div",
+          "sub trunc",
+          `${pending.host}${pending.username ? ` · ${pending.username}` : ""}`,
+        ),
+      ),
+      undo,
+      close,
+    ),
+  );
+  card.setAttribute("role", "status");
+  root.append(card);
+  let timer = 0;
+  const remove = () => {
+    window.clearTimeout(timer);
+    card.classList.add("out");
+    setTimeout(() => host.remove(), 220);
+  };
+  const later = (ms: number) => {
+    window.clearTimeout(timer);
+    timer = window.setTimeout(remove, ms);
+  };
+  card.addEventListener("mouseenter", () => window.clearTimeout(timer));
+  card.addEventListener("mouseleave", () => later(4000));
+  later(8000);
+  close.addEventListener("click", (e) => e.isTrusted && remove());
+  undo.addEventListener("click", async (e) => {
+    if (!e.isTrusted) return;
+    undo.disabled = true;
+    const u = await call<string>({ type: "undoSave", id: pending.id });
+    matchCache = null;
+    const title = card.querySelector(".title");
+    if (title)
+      title.textContent = u?.ok
+        ? u.data === "removed"
+          ? "Removed from Minions"
+          : "Old password put back"
+        : (u?.error ?? "Could not undo");
+    undo.remove();
+    later(2200);
+  });
+}
+
+function askToSave(pending: PendingSave, error?: string) {
+  if (document.getElementById("minions-save-prompt")) return;
+  const { host, root } = toastHost();
   const isUpdate = !!pending.updateItemId;
 
   const button = (cls: string, label: string, action: SaveAction) => {
@@ -958,6 +1150,7 @@ async function showPrompt() {
   );
   card.setAttribute("role", "dialog");
   card.setAttribute("aria-label", "Save to Minions");
+  if (error) card.insertBefore(el("div", "err", error), card.querySelector(".row"));
   root.append(card);
 
   let timer = 0;
@@ -1032,9 +1225,21 @@ async function hello() {
 if (ON_APP) {
   window.addEventListener("message", (e: MessageEvent) => {
     if (e.source !== window || e.origin !== location.origin) return;
+    // Left behind by an extension reload: the live copy answers, not this one.
+    if (!chrome.runtime?.id) return;
     const d = e.data as Record<string, unknown> | null;
     if (!d || typeof d !== "object" || d.source !== FROM_APP) return;
     if (d.type === "ping") void hello();
+    else if (d.type === "unlock-me") {
+      // The app is locked: hand it the keys if this extension is unlocked for the same account.
+      void call<Record<string, unknown>>({
+        type: "bridgeUnlockApp",
+        nonce: d.nonce,
+        userId: d.userId,
+      } as Request).then((r) =>
+        toApp(r?.ok ? { type: "keys", ok: true, ...r.data } : { type: "keys", ok: false }),
+      );
+    } else if (d.type === "lock") void send({ type: "bridgeLock" });
     else if (d.type === "link") {
       const req = {
         type: "bridgeLink",

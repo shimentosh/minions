@@ -951,7 +951,7 @@ export function SettingsPage() {
             <Section title="Vault">
               <Row
                 label="Auto-lock"
-                hint="Lock the vault after this much inactivity. The extension and desktop app lock on their own too."
+                hint="Lock the vault after this much inactivity. “Until the browser closes”: unlock once, in the app or the extension, and both stay open until you quit the browser."
               >
                 <SimpleSelect
                   className="w-44"
@@ -965,6 +965,7 @@ export function SettingsPage() {
                     { value: "30", label: "30 minutes" },
                     { value: "60", label: "1 hour" },
                     { value: "240", label: "4 hours" },
+                    { value: "43200", label: "Until the browser closes" },
                   ]}
                 />
               </Row>
