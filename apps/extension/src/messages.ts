@@ -116,6 +116,7 @@ export interface InlineItem {
   username: string | null;
   /** Where a team or shared login comes from. */
   badge: string | null;
+  hasTotp: boolean;
   workspaceId?: string;
   shared?: boolean;
 }
@@ -123,7 +124,23 @@ export interface InlineItem {
 /** What the page's login-field menu may show: the logins for the page's own site, if unlocked. */
 export interface InlineMatch {
   status: Status;
+  /** The user turned the menu off in settings. */
+  enabled: boolean;
+  /** The page's site, as the browser reports it. */
+  host: string | null;
   items: InlineItem[];
+  /** For sign-up forms: the user's chosen sign-up email, then their account email. */
+  emails: string[];
+}
+
+/** Preferences kept in chrome.storage.local (never a secret). */
+export interface Settings {
+  /** The email offered on sign-up forms; the account email when unset. */
+  signupEmail?: string;
+  /** The menu under login, sign-up and 2FA fields. */
+  inlineMenu?: boolean;
+  /** Ask to save logins the user signs in with. */
+  offerSave?: boolean;
 }
 
 /** Popup/content → background. The vault key and secrets never travel the other way unasked. */
@@ -165,6 +182,10 @@ export type Request =
   | { type: "inlineFill"; itemId: string; workspaceId?: string; shared?: boolean }
   /** Step one of a two-step sign-in: the username, remembered briefly for the password step. */
   | { type: "usernameSeen"; username: string }
+  /** A strong password for a sign-up or change-password field, from the user's generator settings. */
+  | { type: "inlineGenerate" }
+  /** The current 2FA code of a login for the sender page's site. */
+  | { type: "inlineTotp"; itemId: string; workspaceId?: string; shared?: boolean }
   /** The page's menu asks the user to unlock: open the toolbar popup. */
   | { type: "openPopup" }
   | { type: "activity" }
@@ -209,9 +230,11 @@ export function isValidRequest(msg: unknown): msg is Request {
     case "totpList":
     case "bridgeHello":
     case "inlineMatch":
+    case "inlineGenerate":
     case "openPopup":
       return true;
     case "inlineFill":
+    case "inlineTotp":
       return uuid(m.itemId) && optionalId(m.workspaceId) && optionalBool(m.shared);
     case "usernameSeen":
       return str(m.username, 256);

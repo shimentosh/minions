@@ -49,7 +49,8 @@ async function send<T>(req: Request): Promise<T | null> {
 
 const TEXTISH = 'input[type="email"], input[type="text"], input:not([type])';
 const USERNAME_HINT = /user|e-?mail|login|account|identifier|signin/;
-const NOT_LOGIN = /search|query|newsletter|subscri|coupon|promo|captcha|one-time|otp|zip|postal/;
+const NOT_LOGIN =
+  /search|query|newsletter|subscri|coupon|promo|captcha|one-time|\botp\b|2fa|mfa|zip|postal/;
 
 function visible(el: HTMLElement) {
   const r = el.getBoundingClientRect();
@@ -144,7 +145,12 @@ function submitted(): { username: string; password: string } | null {
 }
 
 function setValue(input: HTMLInputElement, value: string) {
-  input.focus({ preventScroll: true });
+  filling = true;
+  try {
+    input.focus({ preventScroll: true });
+  } finally {
+    filling = false;
+  }
   // The native setter, so frameworks that track the value (React and others) see the change.
   const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
   setter?.call(input, value);
@@ -233,65 +239,150 @@ function overlay(id: string, css: string) {
   return { host, root };
 }
 
-// ─── The menu under a login field ────────────────────────────────────────────
+// ─── What kind of field this is ──────────────────────────────────────────────
+
+/**
+ * login         a username or password on a sign-in form: the site's saved logins
+ * new-password  a sign-up or change-password field: a generated password
+ * signup-email  the email on a sign-up form: the user's own email
+ * otp           a two-factor code field: the code from the site's saved login
+ */
+type FieldKind = "login" | "new-password" | "signup-email" | "otp";
+
+const OTP_HINT =
+  /one-?time|\botp\b|totp|2fa|mfa|two.?factor|verification.?code|security.?code|auth\w*.?code|\bcode\b/;
+const NOT_OTP = /zip|postal|promo|coupon|discount|voucher|gift|referral|invite|country|phone|area/;
+const SIGNUP_WORDS = /sign\s?up|register|create (an |your |my )?account|get started|join now/i;
+const SIGNIN_WORDS = /sign\s?in|log\s?in/i;
+
+const scopeOf = (i: HTMLInputElement): ParentNode => i.form ?? document;
+const isCurrent = (p: HTMLInputElement) => /current-password/.test(p.autocomplete);
+
+function passwordsIn(scope: ParentNode) {
+  return [...scope.querySelectorAll<HTMLInputElement>('input[type="password"]')].filter(usable);
+}
+
+/** A sign-up form: a new password, a password asked twice, or a form that says so. */
+function isSignupScope(scope: ParentNode) {
+  const pws = passwordsIn(scope);
+  if (pws.some(isCurrent)) return false;
+  if (pws.some(isNew) || pws.length >= 2) return true;
+  // Button wording only within a form: a page-wide "Sign up" link proves nothing.
+  if (!(scope instanceof HTMLFormElement)) return false;
+  const words = [
+    ...scope.querySelectorAll<HTMLElement>('button, input[type="submit"], [role="button"]'),
+  ]
+    .map((b) => (b instanceof HTMLInputElement ? b.value : (b.textContent ?? "")))
+    .join(" ");
+  const named = `${scope.id} ${scope.className} ${scope.getAttribute("action") ?? ""}`;
+  return (SIGNUP_WORDS.test(words) || /signup|register/i.test(named)) && !SIGNIN_WORDS.test(words);
+}
+
+/** A password field that wants a new password (sign-up, or the new one when changing it). */
+function isNewPasswordField(p: HTMLInputElement) {
+  if (isNew(p)) return true;
+  if (isCurrent(p)) return false;
+  const pws = passwordsIn(scopeOf(p));
+  if (pws.some(isCurrent)) return true;
+  if (pws.length >= 3) return pws.indexOf(p) > 0;
+  if (pws.length === 2) return true;
+  return isSignupScope(scopeOf(p));
+}
+
+function classify(t: EventTarget | null): FieldKind | null {
+  if (!(t instanceof HTMLInputElement) || !usable(t)) return null;
+  if (t.type === "password") return isNewPasswordField(t) ? "new-password" : "login";
+  const h = hay(t);
+  if (
+    t.matches(`${TEXTISH}, input[type="tel"], input[type="number"]`) &&
+    (/one-time-code/.test(t.autocomplete) || (OTP_HINT.test(h) && !NOT_OTP.test(h)))
+  )
+    return "otp";
+  if (!t.matches(TEXTISH)) return null;
+  const score = usernameScore(t);
+  if (score < 0) return null;
+  if (isSignupScope(scopeOf(t)))
+    return t.type === "email" || /e-?mail/.test(h) ? "signup-email" : null;
+  const pws = passwords();
+  if (pws.length)
+    return score >= 1 || pws.some((p) => p.form && p.form === t.form) ? "login" : null;
+  return score >= 2 ? "login" : null;
+}
+
+const isLoginField = (t: EventTarget | null): t is HTMLInputElement => classify(t) === "login";
+
+// ─── The menu under a field ──────────────────────────────────────────────────
 
 const MENU_CSS = `
   .menu{width:var(--w,300px);animation:pop .14s ease-out}
   @keyframes pop{from{opacity:0;transform:translateY(-4px)}}
   .head{display:flex;align-items:center;gap:8px;padding:8px 8px 6px 10px;font-weight:600;font-size:12px}
-  .head .t{flex:1}
-  .list{padding:0 4px 4px;max-height:260px;overflow:auto}
+  .head .t{flex:1;min-width:0}
+  .head .host{font-weight:400;color:var(--muted)}
+  .list{padding:0 4px 4px;max-height:280px;overflow:auto}
   .item{all:unset;box-sizing:border-box;display:flex;align-items:center;gap:10px;width:100%;padding:7px 8px;border-radius:9px;cursor:pointer}
   .item[hidden]{display:none}
   .item:hover,.item.on{background:var(--hover)}
   .meta{flex:1;min-width:0;display:flex;flex-direction:column}
   .name{font-weight:550;font-size:13px}
   .sub{font-size:12px;color:var(--muted)}
+  .pw{font:12.5px/1.4 ui-monospace,SFMono-Regular,Menlo,monospace;color:var(--fg);letter-spacing:.2px}
+  .pw .d{color:#2563eb}.pw .s{color:#db2777}
+  @media (prefers-color-scheme:dark){.pw .d{color:#60a5fa}.pw .s{color:#f472b6}}
+  .ic{flex:none;display:grid;place-items:center;width:28px;height:28px;border-radius:8px;background:var(--hover);color:var(--fg)}
   .badge{flex:none;font-size:11px;color:var(--muted);border:1px solid var(--line);border-radius:999px;padding:1px 7px;max-width:96px}
   .go{flex:none;font-size:11px;color:var(--muted);opacity:0}
   .item:hover .go,.item.on .go{opacity:1}
-  .locked{display:flex;align-items:center;gap:10px;padding:6px 10px 10px}
-  .locked .meta{font-size:12px}
+  .info{display:flex;align-items:center;gap:10px;padding:4px 10px 10px;font-size:12px}
+  .info .meta{color:var(--muted)}
   button.btn{all:unset;cursor:pointer;flex:none;font-weight:550;font-size:12px;padding:6px 10px;border-radius:8px;background:var(--primary);color:var(--on-primary)}
   .msg{padding:0 10px 10px}
 `;
+
+const PLUS_SVG =
+  '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M9.937 15.5A2 2 0 0 0 8.5 14.063l-6.135-1.582a.5.5 0 0 1 0-.962L8.5 9.936A2 2 0 0 0 9.937 8.5l1.582-6.135a.5.5 0 0 1 .963 0L14.063 8.5A2 2 0 0 0 15.5 9.937l6.135 1.581a.5.5 0 0 1 0 .964L15.5 14.063a2 2 0 0 0-1.437 1.437l-1.582 6.135a.5.5 0 0 1-.963 0z"/></svg>';
+const MAIL_SVG =
+  '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><rect width="20" height="16" x="2" y="4" rx="2"/><path d="m22 7-8.97 5.7a1.94 1.94 0 0 1-2.06 0L2 7"/></svg>';
+const TIMER_SVG =
+  '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><line x1="10" x2="14" y1="2" y2="2"/><line x1="12" x2="15" y1="14" y2="11"/><circle cx="12" cy="14" r="8"/></svg>';
+const REFRESH_SVG =
+  '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M8 16H3v5"/></svg>';
+
+/** One choice in the menu: what it shows, what typing matches, what picking it does. */
+interface Row {
+  el: HTMLElement;
+  /** Text typing filters on; null rows are never filtered out. */
+  match: string | null;
+  /** Fills the page; resolves to an error to show, or null. */
+  run: () => Promise<string | null>;
+}
 
 interface Menu {
   host: HTMLElement;
   root: ShadowRoot;
   box: HTMLElement;
   anchor: HTMLInputElement;
-  /** Every login offered, and below, the ones still shown after typing. */
-  all: { row: HTMLElement; pick: InlineItem }[];
-  items: HTMLElement[];
-  picks: InlineItem[];
+  kind: FieldKind;
+  rows: Row[];
+  /** The rows still shown after typing. */
+  shown: Row[];
   active: number;
+  /** Only a note (locked, nothing saved): shown above the field, out of the way. */
+  note: boolean;
 }
 
 let menu: Menu | null = null;
 /** The user closed the menu: not again on this page. */
 let menuDismissed = false;
-/** Just filled: focus moving through the fields should not reopen it. */
-let suppressUntil = 0;
-/** Shown once per page while locked, so a locked vault does not nag on every field. */
-let lockedShown = false;
+/** Minions itself is moving focus through the fields it fills: no menu for that. */
+let filling = false;
+/** Notes (locked, nothing saved here) are shown once per page, not on every field. */
+let noteShown = false;
 let matchCache: { at: number; data: InlineMatch } | null = null;
 let opening = 0;
 
-/** A field the menu belongs under: a password, or a username next to one (or alone, clearly labelled). */
-function isLoginField(t: EventTarget | null): t is HTMLInputElement {
-  if (!(t instanceof HTMLInputElement) || !usable(t)) return false;
-  if (t.type === "password") return !isNew(t);
-  if (!t.matches(TEXTISH)) return false;
-  const score = usernameScore(t);
-  if (score < 0) return false;
-  const pws = passwords();
-  if (pws.length) return score >= 1 || pws.some((p) => p.form && p.form === t.form);
-  return score >= 2;
-}
-
 async function inlineMatch(): Promise<InlineMatch | null> {
-  // Logins are asked for once a minute at most; a locked vault is asked again each time.
+  // Asked once a minute at most while unlocked; otherwise each time, so an unlock shows at once.
   if (matchCache?.data.status === "unlocked" && Date.now() - matchCache.at < 60_000)
     return matchCache.data;
   const data = await send<InlineMatch>({ type: "inlineMatch" });
@@ -312,7 +403,9 @@ function placeMenu() {
   menu.box.style.setProperty("--w", `${width}px`);
   const h = menu.box.offsetHeight;
   const below = r.bottom + 6;
-  const top = below + h > innerHeight - 8 && r.top - h - 6 > 8 ? r.top - h - 6 : below;
+  const above = r.top - h - 6;
+  // A note goes above, so it never covers the next field (the password under a username).
+  const top = above > 8 && (menu.note || below + h > innerHeight - 8) ? above : below;
   const left = Math.min(Math.max(8, r.left), innerWidth - width - 8);
   menu.host.style.transform = `translate(${Math.round(left)}px, ${Math.round(top)}px)`;
 }
@@ -320,48 +413,27 @@ function placeMenu() {
 function setActive(i: number) {
   if (!menu) return;
   menu.active = i;
-  for (const [n, it] of menu.items.entries()) it.classList.toggle("on", n === i);
-  menu.items[i]?.scrollIntoView({ block: "nearest" });
+  for (const [n, r] of menu.shown.entries()) r.el.classList.toggle("on", n === i);
+  menu.shown[i]?.el.scrollIntoView({ block: "nearest" });
 }
 
 /**
- * The user is typing it themselves. In a password field the menu steps out of
- * the way (it would cover the sign-in button); in a username field it keeps
- * only the logins that match what is typed, and closes when none do.
+ * The user is typing it themselves. Over a password or a code the menu steps
+ * out of the way (it would cover the button); elsewhere it keeps only the
+ * choices that match what is typed, and closes when none do.
  */
 function filterMenu() {
   if (!menu) return;
   const m = menu;
-  if (m.anchor.type === "password") return closeMenu();
+  if (m.kind === "new-password" || m.kind === "otp" || m.anchor.type === "password")
+    return closeMenu();
   const q = m.anchor.value.trim().toLowerCase();
-  const shown = m.all.filter(
-    ({ pick: p }) => !q || `${p.username ?? ""} ${p.name}`.toLowerCase().includes(q),
-  );
-  if (!shown.length) return closeMenu();
-  for (const { row } of m.all) row.hidden = !shown.some((x) => x.row === row);
-  m.items = shown.map((x) => x.row);
-  m.picks = shown.map((x) => x.pick);
+  const shown = m.rows.filter((r) => r.match === null || !q || r.match.includes(q));
+  if (!shown.some((r) => r.match !== null)) return closeMenu();
+  for (const r of m.rows) r.el.hidden = !shown.includes(r);
+  m.shown = shown;
   setActive(-1);
   placeMenu();
-}
-
-/** The field a fill from the menu goes to (read by the fill handler). */
-let fillAnchor: HTMLInputElement | null = null;
-
-async function pick(item: InlineItem) {
-  if (!menu) return;
-  const m = menu;
-  suppressUntil = Date.now() + 3000;
-  fillAnchor = m.anchor;
-  const r = await call({
-    type: "inlineFill",
-    itemId: item.id,
-    ...(item.workspaceId ? { workspaceId: item.workspaceId } : {}),
-    ...(item.shared ? { shared: true } : {}),
-  });
-  fillAnchor = null;
-  if (r?.ok) return closeMenu();
-  showMenuMessage(m, r ? r.error : "Minions did not answer. Reload the page and try again.");
 }
 
 function showMenuMessage(m: Menu, text: string) {
@@ -370,69 +442,234 @@ function showMenuMessage(m: Menu, text: string) {
   placeMenu();
 }
 
-function buildMenu(anchor: HTMLInputElement, data: InlineMatch): Menu {
+async function choose(row: Row) {
+  const m = menu;
+  if (!m) return;
+  const error = await row.run();
+  if (error) showMenuMessage(m, error);
+  else closeMenu();
+}
+
+function rowButton(
+  icon: HTMLElement,
+  title: string,
+  sub: Node | string | null,
+  extra: (Node | null)[] = [],
+) {
+  const b = el(
+    "button",
+    "item",
+    icon,
+    el("span", "meta", el("span", "name trunc", title), sub ? el("span", "sub trunc", sub) : null),
+    ...extra,
+  );
+  b.type = "button";
+  b.setAttribute("role", "option");
+  return b;
+}
+
+function letterIcon(name: string) {
+  const av = el("span", "av", (name.trim()[0] ?? "?").toUpperCase());
+  av.style.background = colorFor(name);
+  return av;
+}
+
+/** A generated password with digits and symbols coloured, so it reads unambiguously. */
+function passwordText(pw: string) {
+  const span = el("span", "pw trunc");
+  for (const c of pw)
+    span.append(/[0-9]/.test(c) ? el("span", "d", c) : /[A-Za-z]/.test(c) ? c : el("span", "s", c));
+  return span;
+}
+
+/** Fills a code into one field, or across a row of one-character boxes. */
+function fillCode(anchor: HTMLInputElement, code: string) {
+  if (anchor.maxLength !== 1) return setValue(anchor, code);
+  const boxes = [
+    ...(anchor.parentElement?.parentElement ?? document).querySelectorAll<HTMLInputElement>(
+      "input",
+    ),
+  ].filter((i) => i.maxLength === 1 && usable(i));
+  const start = Math.max(0, boxes.indexOf(anchor));
+  [...code].forEach((c, n) => {
+    const box = boxes[start + n];
+    if (box) setValue(box, c);
+  });
+}
+
+/** The field a login fill from the menu goes to (read by the fill handler). */
+let fillAnchor: HTMLInputElement | null = null;
+
+function rowsFor(m: Menu, data: InlineMatch): Row[] {
+  const anchor = m.anchor;
+  const ref = (it: InlineItem) => ({
+    itemId: it.id,
+    ...(it.workspaceId ? { workspaceId: it.workspaceId } : {}),
+    ...(it.shared ? { shared: true } : {}),
+  });
+
+  if (m.kind === "login")
+    return data.items.map((it) => {
+      const row = rowButton(letterIcon(it.name), it.name, it.username, [
+        it.badge ? el("span", "badge trunc", it.badge) : null,
+        el("span", "go", "Fill"),
+      ]);
+      row.title = `Fill ${it.username || it.name}`;
+      return {
+        el: row,
+        match: `${it.username ?? ""} ${it.name}`.toLowerCase(),
+        run: async () => {
+          fillAnchor = anchor;
+          const r = await call({ type: "inlineFill", ...ref(it) });
+          fillAnchor = null;
+          return r?.ok ? null : (r?.error ?? "Minions did not answer. Reload the page.");
+        },
+      };
+    });
+
+  if (m.kind === "otp")
+    return data.items
+      .filter((it) => it.hasTotp)
+      .map((it) => ({
+        el: rowButton(svg(TIMER_SVG, "ic"), `2FA code for ${it.name}`, it.username, [
+          el("span", "go", "Fill"),
+        ]),
+        match: null,
+        run: async () => {
+          const r = await call<string>({ type: "inlineTotp", ...ref(it) });
+          if (!r?.ok) return r?.error ?? "Minions did not answer. Reload the page.";
+          fillCode(anchor, r.data);
+          return null;
+        },
+      }));
+
+  if (m.kind === "signup-email")
+    return data.emails.map((email) => ({
+      el: rowButton(svg(MAIL_SVG, "ic"), email, "Your email", [el("span", "go", "Fill")]),
+      match: email.toLowerCase(),
+      run: async () => {
+        setValue(anchor, email);
+        return null;
+      },
+    }));
+
+  // A new password: generated here, shown, and put into the field and its confirmation.
+  let pw = "";
+  const text = el("span", "pw trunc", "…");
+  const again = svg(REFRESH_SVG, "x");
+  again.title = "Another one";
+  const row = rowButton(svg(PLUS_SVG, "ic"), "Use a strong password", text, [again]);
+  const regen = async () => {
+    pw = (await send<string>({ type: "inlineGenerate" })) ?? "";
+    row.querySelector(".meta")?.lastElementChild?.replaceWith(passwordText(pw));
+    placeMenu();
+  };
+  again.addEventListener("click", (e) => {
+    e.stopPropagation();
+    if (e.isTrusted) void regen();
+  });
+  void regen();
+  return [
+    {
+      el: row,
+      match: null,
+      run: async () => {
+        if (!pw) return "Could not make a password. Try again.";
+        const targets = passwordsIn(scopeOf(anchor)).filter(
+          (p) => p === anchor || isNewPasswordField(p),
+        );
+        for (const p of targets) if (!p.value || p === anchor) setValue(p, pw);
+        return null;
+      },
+    },
+  ];
+}
+
+/** A one-line note with an optional button (locked, signed out, nothing saved). */
+function note(m: Menu, icon: string, text: string, action?: { label: string; run: () => void }) {
+  const parts: (Node | null)[] = [svg(icon, "muted"), el("span", "meta", text)];
+  if (action) {
+    const b = el("button", "btn", action.label);
+    b.type = "button";
+    b.addEventListener("click", (e) => {
+      if (e.isTrusted) action.run();
+    });
+    parts.push(b);
+  }
+  m.box.append(el("div", "info", ...parts));
+}
+
+function unlockAction(m: Menu, label: string) {
+  return {
+    label,
+    run: async () => {
+      const r = await call({ type: "openPopup" });
+      if (r?.ok) closeMenu();
+      else showMenuMessage(m, r?.error ?? "Click the Minions icon in the toolbar");
+    },
+  };
+}
+
+/** Builds the menu for a field, or null when there is nothing worth showing. */
+function buildMenu(anchor: HTMLInputElement, kind: FieldKind, data: InlineMatch): Menu | null {
+  const unlocked = data.status === "unlocked";
+  const signedIn = unlocked || data.status === "locked";
+  // What each kind needs: logins and codes need the vault; an email needs the
+  // account; a generated password needs nothing.
+  const needsVault = kind === "login" || kind === "otp";
+  if (kind === "signup-email" && !data.emails.length) return null;
+  if (kind === "otp" && unlocked && !data.items.some((i) => i.hasTotp)) return null;
+  const emptyLogin = kind === "login" && unlocked && !data.items.length;
+  const showNote = (needsVault && !unlocked) || emptyLogin;
+  if (showNote && (noteShown || (kind === "otp" && !unlocked))) return null;
+
   const { host, root } = overlay("minions-fill-menu", MENU_CSS);
   const close = el("button", "x", "×");
   close.setAttribute("aria-label", "Close");
   const box = el(
     "div",
     "card menu",
-    el("div", "head", svg(LOGO_SVG, "mark"), el("span", "t", "Minions"), close),
+    el(
+      "div",
+      "head",
+      svg(LOGO_SVG, "mark"),
+      el("span", "t trunc", "Minions", data.host ? el("span", "host", ` · ${data.host}`) : null),
+      close,
+    ),
   );
   box.setAttribute("role", "listbox");
-  const m: Menu = { host, root, box, anchor, all: [], items: [], picks: [], active: -1 };
+  const m: Menu = {
+    host,
+    root,
+    box,
+    anchor,
+    kind,
+    rows: [],
+    shown: [],
+    active: -1,
+    note: showNote,
+  };
 
-  if (data.status === "unlocked") {
+  if (showNote) {
+    noteShown = true;
+    if (emptyLogin) {
+      note(m, LOCK_SVG, "No saved login here yet. Sign in and Minions offers to save it.");
+      setTimeout(() => menu === m && closeMenu(), 6000);
+    } else if (signedIn) note(m, LOCK_SVG, "Unlock Minions to fill.", unlockAction(m, "Unlock"));
+    else note(m, LOCK_SVG, "Sign in to Minions to fill.", unlockAction(m, "Sign in"));
+  } else {
+    m.rows = rowsFor(m, data);
+    m.shown = [...m.rows];
     const list = el("div", "list");
-    for (const it of data.items) {
-      const label = it.username || it.name;
-      const av = el("span", "av", (it.name.trim()[0] ?? "?").toUpperCase());
-      av.style.background = colorFor(it.name);
-      const row = el(
-        "button",
-        "item",
-        av,
-        el(
-          "span",
-          "meta",
-          el("span", "name trunc", it.name),
-          it.username ? el("span", "sub trunc", it.username) : null,
-        ),
-        it.badge ? el("span", "badge trunc", it.badge) : null,
-        el("span", "go", "Fill"),
-      );
-      row.type = "button";
-      row.setAttribute("role", "option");
-      row.title = `Fill ${label}`;
-      row.addEventListener("click", (e) => {
+    for (const r of m.rows) {
+      r.el.addEventListener("click", (e) => {
         // A page script cannot press these for the user: synthetic clicks are ignored.
-        if (e.isTrusted) void pick(it);
+        if (e.isTrusted) void choose(r);
       });
-      row.addEventListener("mouseenter", () => setActive(m.items.indexOf(row)));
-      m.all.push({ row, pick: it });
-      m.items.push(row);
-      m.picks.push(it);
-      list.append(row);
+      r.el.addEventListener("mouseenter", () => setActive(m.shown.indexOf(r)));
+      list.append(r.el);
     }
     box.append(list);
-  } else {
-    const unlock = el("button", "btn", "Unlock");
-    unlock.type = "button";
-    unlock.addEventListener("click", async (e) => {
-      if (!e.isTrusted) return;
-      const r = await call({ type: "openPopup" });
-      if (r?.ok) closeMenu();
-      else showMenuMessage(m, r ? r.error : "Click the Minions icon in the toolbar to unlock");
-    });
-    box.append(
-      el(
-        "div",
-        "locked",
-        svg(LOCK_SVG, "muted"),
-        el("span", "meta muted", "Unlock Minions to fill your saved login."),
-        unlock,
-      ),
-    );
   }
 
   close.addEventListener("click", (e) => {
@@ -446,21 +683,24 @@ function buildMenu(anchor: HTMLInputElement, data: InlineMatch): Menu {
   return m;
 }
 
-async function openMenu(anchor: HTMLInputElement) {
-  if (ON_APP || menuDismissed || Date.now() < suppressUntil) return;
+async function openMenu(anchor: HTMLInputElement, kind: FieldKind) {
+  if (ON_APP || menuDismissed || filling) return;
   if (menu?.anchor === anchor) return;
   const ticket = ++opening;
   const data = await inlineMatch();
   // The user may have moved on while the background answered.
-  if (ticket !== opening || document.activeElement !== anchor || !data) return;
-  const showLocked = data.status === "locked" && anchor.type === "password" && !lockedShown;
-  if (!(data.status === "unlocked" && data.items.length) && !showLocked) return closeMenu();
-  if (showLocked) lockedShown = true;
+  if (ticket !== opening || document.activeElement !== anchor || !data?.enabled) return;
   closeMenu();
-  menu = buildMenu(anchor, data);
+  menu = buildMenu(anchor, kind, data);
+  if (!menu) return;
   placeMenu();
   // Typed into while the menu was on its way: treat it as typing.
-  if (anchor.value && data.status === "unlocked") filterMenu();
+  if (anchor.value && menu.rows.length) filterMenu();
+}
+
+function maybeOpen(t: EventTarget | null) {
+  const kind = classify(t);
+  if (kind) void openMenu(t as HTMLInputElement, kind);
 }
 
 let placing = false;
@@ -477,9 +717,8 @@ if (!ON_APP) {
   document.addEventListener(
     "focusin",
     (e) => {
-      const t = e.target;
-      if (menu && t !== menu.anchor) closeMenu();
-      if (isLoginField(t)) void openMenu(t);
+      if (menu && e.target !== menu.anchor) closeMenu();
+      maybeOpen(e.target);
     },
     true,
   );
@@ -505,7 +744,7 @@ if (!ON_APP) {
   addEventListener("scroll", schedulePlace, { capture: true, passive: true });
   addEventListener("resize", schedulePlace, { passive: true });
   // A field focused before this script ran (autofocus on a sign-in page).
-  if (isLoginField(document.activeElement)) void openMenu(document.activeElement);
+  maybeOpen(document.activeElement);
 }
 
 // ─── Fill requests from the background ───────────────────────────────────────
@@ -536,7 +775,6 @@ chrome.runtime.onMessage.addListener(
     const focused = document.activeElement;
     const anchor = fillAnchor ?? (isLoginField(focused) ? focused : null);
     const { username, password } = fieldsForFill(anchor);
-    suppressUntil = Date.now() + 3000;
     closeMenu();
     if (username && msg.username) setValue(username, msg.username);
     if (password && msg.password) setValue(password, msg.password);
@@ -587,7 +825,7 @@ document.addEventListener(
     if (!e.isTrusted) return;
     const t = e.target as HTMLElement | null;
     // Clicking back into a login field brings the menu back.
-    if (!menu && isLoginField(t) && document.activeElement === t) void openMenu(t);
+    if (!menu && document.activeElement === t) maybeOpen(t);
     const button = t?.closest("button, input[type=submit], input[type=button], [role=button]");
     if (button) report();
   },
@@ -598,7 +836,7 @@ document.addEventListener(
   (e) => {
     if (!e.isTrusted) return;
     if (menu && e.target === menu.anchor) {
-      const n = menu.items.length;
+      const n = menu.shown.length;
       if (e.key === "ArrowDown" && n) {
         e.preventDefault();
         return setActive((menu.active + 1) % n);
@@ -616,7 +854,7 @@ document.addEventListener(
         // Enter on a highlighted login fills it instead of submitting the form.
         e.preventDefault();
         e.stopImmediatePropagation();
-        void pick(menu.picks[menu.active]!);
+        void choose(menu.shown[menu.active]!);
         return;
       }
     }

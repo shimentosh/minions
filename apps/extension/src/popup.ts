@@ -9,6 +9,7 @@ import {
   type ListedItem,
   type MatchResponse,
   type PendingSave,
+  type Settings,
   type StateResponse,
   send,
   type TotpEntry,
@@ -74,6 +75,10 @@ const ICONS = {
     '<path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z"/><path d="m9 12 2 2 4-4"/>',
   star: '<path d="M11.525 2.295a.53.53 0 0 1 .95 0l2.31 4.679a2.123 2.123 0 0 0 1.595 1.16l5.166.756a.53.53 0 0 1 .294.904l-3.736 3.638a2.123 2.123 0 0 0-.611 1.878l.882 5.14a.53.53 0 0 1-.771.56l-4.618-2.428a2.122 2.122 0 0 0-1.973 0L6.396 21.01a.53.53 0 0 1-.77-.56l.881-5.139a2.122 2.122 0 0 0-.611-1.879L2.16 9.795a.53.53 0 0 1 .294-.906l5.165-.755a2.122 2.122 0 0 0 1.597-1.16z"/>',
   clock: '<circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>',
+  settings:
+    '<path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/>',
+  x: '<path d="M18 6 6 18"/><path d="m6 6 12 12"/>',
+  mail: '<rect width="20" height="16" x="2" y="4" rx="2"/><path d="m22 7-8.97 5.7a1.94 1.94 0 0 1-2.06 0L2 7"/>',
 } as const;
 type IconName = keyof typeof ICONS;
 
@@ -1069,6 +1074,8 @@ function generatorView() {
     } catch {
       /* storage blocked */
     }
+    // The same choices for passwords suggested on sign-up forms.
+    void chrome.storage.local.set({ generator: opts });
   };
 
   const regen = () => {
@@ -1229,6 +1236,132 @@ function addView() {
   text.focus();
 }
 
+// ─── Settings ────────────────────────────────────────────────────────────────
+// Preferences live in chrome.storage.local: an email and switches, never a secret.
+
+async function loadSettings(): Promise<Settings> {
+  const { settings } = (await chrome.storage.local.get("settings")) as { settings?: Settings };
+  return settings ?? {};
+}
+
+async function saveSettings(patch: Partial<Settings>) {
+  await chrome.storage.local.set({ settings: { ...(await loadSettings()), ...patch } });
+}
+
+function toggle(on: boolean, label: string, onChange: (on: boolean) => unknown) {
+  const b = h("button", { type: "button", class: "switch" });
+  b.setAttribute("role", "switch");
+  b.setAttribute("aria-label", label);
+  b.setAttribute("aria-checked", String(on));
+  b.addEventListener("click", () => {
+    const next = b.getAttribute("aria-checked") !== "true";
+    b.setAttribute("aria-checked", String(next));
+    void onChange(next);
+  });
+  return b;
+}
+
+function setting(title: string, hint: string, control: Node) {
+  return h(
+    "div",
+    { class: "setting" },
+    h(
+      "div",
+      { class: "meta" },
+      h("div", { class: "title" }, title),
+      h("div", { class: "hint" }, hint),
+    ),
+    control,
+  );
+}
+
+async function settingsView(state: StateResponse) {
+  tabsEl.hidden = true;
+  const prefs = await loadSettings();
+  const { neverSave = [] } = (await chrome.storage.local.get("neverSave")) as {
+    neverSave?: string[];
+  };
+
+  const email = h("input", {
+    type: "email",
+    placeholder: state.email ?? "you@example.com",
+    value: prefs.signupEmail ?? "",
+  });
+  email.addEventListener("change", async () => {
+    const v = email.value.trim();
+    if (v && !email.checkValidity()) return toast("That is not an email address", true);
+    await saveSettings({ signupEmail: v || undefined });
+    toast(v ? "Sign-up email saved" : "Using your account email");
+  });
+
+  const sites = h("div", { class: "card" });
+  const drawSites = (hosts: string[]) => {
+    sites.replaceChildren(
+      ...(hosts.length
+        ? hosts.map((host) =>
+            h(
+              "div",
+              { class: "site" },
+              h("span", {}, host),
+              iconButton("x", `Ask to save on ${host} again`, async () => {
+                const next = hosts.filter((x) => x !== host);
+                await chrome.storage.local.set({ neverSave: next });
+                drawSites(next);
+                toast(`Minions will offer to save on ${host} again`);
+              }),
+            ),
+          )
+        : [h("div", { class: "empty" }, "No sites. “Never for this site” adds them here.")]),
+    );
+  };
+  drawSites([...neverSave].reverse());
+
+  const back = iconButton("back", "Back", () => vaultView(state));
+  render(
+    h("div", { class: "row" }, back, h("h2", {}, "Settings")),
+    h(
+      "div",
+      { class: "section" },
+      h("div", { class: "section-title" }, "Sign-up email"),
+      email,
+      h(
+        "p",
+        { class: "muted small" },
+        "Offered in one click on sign-up forms. Leave empty to use your account email.",
+      ),
+    ),
+    h(
+      "div",
+      { class: "section" },
+      h("div", { class: "section-title" }, "On websites"),
+      h(
+        "div",
+        { class: "card" },
+        setting(
+          "Suggestions on fields",
+          "Your logins, 2FA codes, a strong password and your email, under the field.",
+          toggle(prefs.inlineMenu !== false, "Suggestions on fields", (on) =>
+            saveSettings({ inlineMenu: on }),
+          ),
+        ),
+        setting(
+          "Offer to save logins",
+          "Ask after you sign in or sign up with a new password.",
+          toggle(prefs.offerSave !== false, "Offer to save logins", (on) =>
+            saveSettings({ offerSave: on }),
+          ),
+        ),
+      ),
+    ),
+    h("div", { class: "section" }, h("div", { class: "section-title" }, "Never saved on"), sites),
+    h(
+      "p",
+      { class: "muted small" },
+      "Minions locks when you are away from the computer for your auto-lock time (set in the Minions app under Settings).",
+    ),
+  );
+}
+
 // ─── Routing ─────────────────────────────────────────────────────────────────
 
 async function vaultView(state: StateResponse) {
@@ -1245,9 +1378,11 @@ async function vaultView(state: StateResponse) {
     await send({ type: "logout" });
     await route();
   });
+  const gear = iconButton("settings", "Settings", () => settingsView(state));
   footer.replaceChildren(
     h("span", { class: "dot", title: "Connected" }),
     h("span", { class: "who" }, state.email ?? ""),
+    gear,
     signOut,
   );
   footer.hidden = false;

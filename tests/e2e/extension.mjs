@@ -34,6 +34,13 @@ const pages = {
 <input type=email name=email id=e autocomplete=username><button id=next>Next</button></form>`,
   "/step2": `<!doctype html><title>Step 2</title><form action="/done" method=post>
 <input type=password id=p2 autocomplete=current-password><button id=go>Sign in</button></form>`,
+  // Sign-up: email, a new password and its confirmation.
+  "/signup": `<!doctype html><title>Join</title><form action="/done" method=post>
+<input type=email id=se name=email><input type=password id=n1><input type=password id=n2>
+<button id=join>Create account</button></form>`,
+  // A two-factor step.
+  "/otp": `<!doctype html><title>Code</title><form action="/done" method=post>
+<input id=code autocomplete=one-time-code inputmode=numeric><button id=verify>Verify</button></form>`,
 };
 const site = createServer((req, res) => {
   res.setHeader("content-type", "text/html");
@@ -248,6 +255,125 @@ try {
   );
   if (two) await msg({ type: "resolveSave", id: two.id, action: "ignore" });
   await steps.close();
+
+  // Sign-up: the menu offers the user's email, then a strong password for both fields.
+  const menuOn = (p) =>
+    p
+      .waitForSelector("#minions-fill-menu", { state: "attached", timeout: 5000 })
+      .then(() => true)
+      .catch(() => false);
+  const join = await ctx.newPage();
+  await join.goto("http://localhost:5199/signup");
+  await join.focus("#se");
+  check(await menuOn(join), "a sign-up email field offers the user's email");
+  await join.keyboard.press("ArrowDown");
+  await join.keyboard.press("Enter");
+  await join.waitForFunction(() => document.querySelector("#se").value !== "", null, {
+    timeout: 5000,
+  });
+  check((await join.inputValue("#se")) === email, "fills the account email");
+  await join.focus("#n1");
+  check(await menuOn(join), "a new-password field offers a strong password at once");
+  await join.waitForTimeout(400);
+  await join.keyboard.press("ArrowDown");
+  await join.keyboard.press("Enter");
+  await join.waitForFunction(() => document.querySelector("#n1").value !== "", null, {
+    timeout: 5000,
+  });
+  const made = await join.inputValue("#n1");
+  check(
+    made.length >= 16 && (await join.inputValue("#n2")) === made,
+    "the generated password fills the password and its confirmation",
+  );
+  await join.click("#join");
+  await join.waitForLoadState();
+  const joined = await waitPending((d) => d.username === email);
+  check(joined?.username === email && !joined?.updateItemId, "offers to save the new account");
+  if (joined) await msg({ type: "resolveSave", id: joined.id, action: "ignore" });
+  await join.close();
+
+  // A two-factor code field offers the code of the site's login.
+  {
+    const pre = await (
+      await fetch(`${API}/auth/prelogin`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-minions-client": "web" },
+        body: JSON.stringify({ email }),
+      })
+    ).json();
+    const { authKey, stretchedKey } = await core.deriveMasterKeys(password, pre.kdf);
+    const res = await fetch(`${API}/auth/login`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-minions-client": "web" },
+      body: JSON.stringify({
+        email,
+        authKey,
+        device: { clientDeviceId: crypto.randomUUID(), name: "e2e otp", kind: "web" },
+      }),
+    });
+    const cookie = res.headers.get("set-cookie").split(";")[0];
+    const { keys } = await res.json();
+    const uk = await core.unwrapKey(stretchedKey, keys.protectedUserKey, core.aad.userKey(userId));
+    const vk = await core.unwrapKey(uk, keys.protectedVaultKey, core.aad.vaultKey(vaultId));
+    const id = crypto.randomUUID();
+    const secret = "JBSWY3DPEHPK3PXP";
+    const created = await fetch(`${API}/vault/items`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-minions-client": "web", cookie },
+      body: JSON.stringify({
+        id,
+        type: "LOGIN",
+        name: "Acme 2FA",
+        fields: [
+          { key: "url", value: "http://localhost:5199", sensitive: false },
+          { key: "username", value: "otp@acme.test", sensitive: false },
+          {
+            key: "password",
+            value: await core.encryptString(vk, "Otp-Pass-1!", core.aad.field(id, "password")),
+            sensitive: true,
+          },
+          {
+            key: "totp",
+            value: await core.encryptString(vk, secret, core.aad.field(id, "totp")),
+            sensitive: true,
+          },
+        ],
+      }),
+    });
+    check(created.status === 201, "test login with a 2FA secret created");
+    const otp = await ctx.newPage();
+    await otp.goto("http://localhost:5199/otp");
+    await otp.focus("#code");
+    check(await menuOn(otp), "a 2FA code field offers the site's code");
+    await otp.keyboard.press("ArrowDown");
+    await otp.keyboard.press("Enter");
+    await otp.waitForFunction(() => document.querySelector("#code").value !== "", null, {
+      timeout: 5000,
+    });
+    const expected = (await core.generateTotp(secret)).code;
+    check((await otp.inputValue("#code")) === expected, "fills the current 2FA code");
+    await otp.close();
+  }
+
+  // Turned off in settings: no menu on fields, no offer to save.
+  await popup.evaluate(() =>
+    chrome.storage.local.set({ settings: { inlineMenu: false, offerSave: false } }),
+  );
+  const quiet = await ctx.newPage();
+  await quiet.goto("http://localhost:5199/login");
+  await quiet.focus("#u");
+  check(!(await menuOn(quiet)), "no menu when suggestions are turned off");
+  await quiet.fill("#u", "quiet@acme.test");
+  await quiet.fill("#p", "Quiet-Pass-1!");
+  await quiet.click("#go");
+  await quiet.waitForLoadState();
+  await new Promise((r) => setTimeout(r, 1500));
+  check(
+    (await msg({ type: "pendingSave" })).data?.username !== "quiet@acme.test",
+    "no offer to save when saving is turned off",
+  );
+  await popup.evaluate(() => chrome.storage.local.remove("settings"));
+  await quiet.close();
 
   // Content scripts cannot use privileged messages.
   const fromPage = await site2.evaluate(

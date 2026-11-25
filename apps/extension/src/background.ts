@@ -19,6 +19,7 @@ import {
   aad,
   analyzeCapture,
   canFill,
+  DEFAULT_PASSWORD_OPTIONS,
   decryptString,
   deriveMasterKeys,
   encryptString,
@@ -35,6 +36,7 @@ import {
   normalizeHost,
   openSealedKey,
   type Page,
+  type PasswordOptions,
   type SharedItemDetail,
   type SharedWithMeItem,
   sealContext,
@@ -61,6 +63,7 @@ import {
   type PendingSave,
   type Request,
   type Response,
+  type Settings,
   type StateResponse,
   type Status,
   type TotpEntry,
@@ -582,6 +585,24 @@ async function addNeverSave(host: string) {
   await chrome.storage.local.set({ neverSave: hosts.slice(-NEVER_SAVE_LIMIT) });
 }
 
+// ─── Preferences ─────────────────────────────────────────────────────────────
+// Kept in local storage: an email and on/off switches, never a secret.
+
+async function settings(): Promise<Settings> {
+  const { settings: s } = (await chrome.storage.local.get("settings")) as { settings?: Settings };
+  return s && typeof s === "object" ? s : {};
+}
+
+/** The popup's generator settings, so a password made on a page matches one made there. */
+async function generatorOptions(): Promise<PasswordOptions> {
+  const { generator } = (await chrome.storage.local.get("generator")) as {
+    generator?: Partial<PasswordOptions>;
+  };
+  const o = { ...DEFAULT_PASSWORD_OPTIONS, ...(generator ?? {}) };
+  // A password made for a sign-up form is never short, whatever the slider says.
+  return { ...o, length: Math.max(o.length, 16) };
+}
+
 /** The pending login, unless it has waited too long for an answer. */
 async function currentPending(): Promise<SessionData["pending"] | null> {
   const { pending } = await session.get();
@@ -617,6 +638,8 @@ async function handle(req: Request, sender: chrome.runtime.MessageSender): Promi
       "resolveSave",
       "inlineMatch",
       "inlineFill",
+      "inlineGenerate",
+      "inlineTotp",
       "usernameSeen",
       "openPopup",
     ];
@@ -720,18 +743,46 @@ async function handle(req: Request, sender: chrome.runtime.MessageSender): Promi
     case "inlineMatch": {
       // The page's own site only, as the browser reports it.
       const status = await getStatus();
-      if (status !== "unlocked" || !senderHost) return { status, items: [] } satisfies InlineMatch;
+      const prefs = await settings();
+      const base = { status, host: senderHost, items: [], emails: [] as string[] };
+      if (prefs.inlineMenu === false) return { ...base, enabled: false } satisfies InlineMatch;
+      const account =
+        status === "locked" || status === "unlocked" ? (await session.get()).email : "";
+      const emails = [
+        ...new Set([prefs.signupEmail?.trim(), account].filter((e): e is string => !!e)),
+      ];
+      if (status !== "unlocked" || !senderHost)
+        return { ...base, enabled: true, emails } satisfies InlineMatch;
       const items = (await matchAll(senderHost)).filter(isFillable).map(
         (i): InlineItem => ({
           id: i.id,
           name: i.name,
           username: i.username,
           badge: i.workspaceName ?? (i.sharedBy ? `from ${i.sharedBy}` : null),
+          hasTotp: i.hasTotp,
           ...(i.workspaceId ? { workspaceId: i.workspaceId } : {}),
           ...(i.shared ? { shared: true } : {}),
         }),
       );
-      return { status, items } satisfies InlineMatch;
+      return { ...base, enabled: true, emails, items } satisfies InlineMatch;
+    }
+    case "inlineGenerate":
+      return generatePassword(await generatorOptions());
+    case "inlineTotp": {
+      // Only for a login of the page's own site, like a fill.
+      const opened = await openItem(req.itemId, req.workspaceId, req.shared);
+      const { item } = opened;
+      const savedUrl = item.fields.find((f) => f.key === "url" && !f.sensitive)?.value ?? null;
+      if (!canFill(savedUrl, item.host, sender.url ?? "")) {
+        opened.key.fill(0);
+        throw new Error(`This login is for ${item.host ?? "another site"}`);
+      }
+      const secret = await decryptField(opened, "totp");
+      opened.key.fill(0);
+      if (!secret) throw new Error("No 2FA secret on this login");
+      await session.set({ lastActivity: Date.now() });
+      await recordUsage(opened, "item.totp_generated");
+      return (await generateTotp(secret)).code;
     }
     case "inlineFill":
       // Into the tab that asked; fillTab still checks its address against the item.
@@ -1004,6 +1055,7 @@ async function handle(req: Request, sender: chrome.runtime.MessageSender): Promi
       const { status, recentUsername } = await session.get();
       const host = senderHost;
       if (status !== "unlocked" || !host || !req.password) return null;
+      if ((await settings()).offerSave === false) return null;
       if ((await neverSaveHosts()).includes(host)) return null;
       // A password page with no username on it: take the one from step one.
       const username =
